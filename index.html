@@ -4796,6 +4796,7 @@ async function startLiveQuiz(id){
 
   LIVE_QUIZ_STATE = {
     quizId: q.id,
+    quiz: q,
     answers: {},
     secondsLeft: seconds,
     timerId: null,
@@ -4812,270 +4813,335 @@ async function startLiveQuiz(id){
 
 function liveQuizTick(){if(!LIVE_QUIZ_STATE)return;LIVE_QUIZ_STATE.secondsLeft=Math.max(0,LIVE_QUIZ_STATE.secondsLeft-1);const el=document.getElementById('liveQuizTimer');if(el)el.textContent=fmtQuizTime(LIVE_QUIZ_STATE.secondsLeft);if(LIVE_QUIZ_STATE.secondsLeft<=0)submitLiveQuiz(true);}
 function renderLiveQuizTake(){
-  const q=LIVE_QUIZZES.find(x=>x.id===LIVE_QUIZ_STATE.quizId);if(!q)return '';
+  const q=LIVE_QUIZZES.find(x=>x.id===LIVE_QUIZ_STATE.quizId)||LIVE_QUIZ_STATE.quiz;if(!q)return '';
   return `<div class="quiz-timerbar"><div><div class="tlabel">⏱ Time remaining</div><div class="tval" id="liveQuizTimer">${fmtQuizTime(LIVE_QUIZ_STATE.secondsLeft)}</div></div><button class="btn btn-primary btn-sm" onclick="submitLiveQuiz(false)">Submit</button></div><h2 class="pagetitle">${esc(q.title)}</h2><p class="pagesub">${q.questions.length} questions · select one answer for each.</p>${q.questions.map((x,i)=>`<div class="qn-card"><div class="qn-num">Question ${i+1} of ${q.questions.length}</div><div class="qn-text">${esc(x.text)}</div><div class="qn-opts">${x.options.map((o,j)=>`<div class="qn-opt ${LIVE_QUIZ_STATE.answers[i]===j?'selected':''}" onclick="LIVE_QUIZ_STATE.answers[${i}]=${j};render()"><span class="oletter">${String.fromCharCode(65+j)}</span><span>${esc(o)}</span></div>`).join('')}</div></div>`).join('')}<button class="btn btn-primary btn-block" onclick="submitLiveQuiz(false)">Submit Quiz</button>`;
+}
+
+let LIVE_QUIZ_SUBMITTING=false;
+
+function quizSaveOverlay(html){
+  let o=document.getElementById('quizSaveOverlay');
+  if(!html){ if(o) o.remove(); return; }
+  if(!o){
+    o=document.createElement('div');
+    o.id='quizSaveOverlay';
+    o.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px';
+    document.body.appendChild(o);
+  }
+  o.innerHTML='<div class="card" style="max-width:340px;width:100%;text-align:center;margin:0">'+html+'</div>';
+}
+
+function quizNewUuid(){
+  if(window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const b=new Uint8Array(16); crypto.getRandomValues(b);
+  b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
+  const h=[...b].map(x=>x.toString(16).padStart(2,'0')).join('');
+  return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+}
+
+function quizFriendlyError(e){
+  const msg=(e&&e.message)||String(e||'');
+  if(e&&e.code==='42501'||/row-level security|permission denied/i.test(msg))
+    return 'The database refused this save (permission / security policy). Please tell the Academic Committee. Details: '+msg;
+  if(/failed to fetch|networkerror|load failed/i.test(msg))
+    return 'Network problem — your answers are still on this screen. Check your connection and tap Retry.';
+  return msg||'Unknown error';
 }
 
 async function submitLiveQuiz(auto){
   if(!LIVE_QUIZ_STATE) return;
-
+  if(LIVE_QUIZ_SUBMITTING) return;          // blocks double-clicks / timer + click races
+  LIVE_QUIZ_SUBMITTING=true;
   clearInterval(LIVE_QUIZ_STATE.timerId);
 
-  const sb = window.supabaseClient;
-
-  if(!sb){
-    toast('Supabase connection is not available.');
-    return;
-  }
-
-  const q = LIVE_QUIZZES.find(
-    x => x.id === LIVE_QUIZ_STATE.quizId
-  );
-
-  if(!q){
-    toast('Quiz could not be found.');
-    return;
-  }
+  quizSaveOverlay('<b>Saving your quiz…</b><div class="qmeta" style="margin-top:6px">Please do not close or refresh this page.</div>');
 
   try{
-    const { data: authData, error: authError } =
-      await sb.auth.getUser();
+    const sb=window.supabaseClient;
+    if(!sb) throw new Error('Supabase connection is not available.');
 
-    if(authError || !authData?.user){
-      throw new Error('Supabase login session not found.');
-    }
+    const st=LIVE_QUIZ_STATE;
+    const q=st.quiz || LIVE_QUIZZES.find(x=>x.id===st.quizId);
+    if(!q) throw new Error('Quiz could not be found.');
 
-    const studentId = authData.user.id;
+    const {data:authData,error:authError}=await sb.auth.getUser();
+    if(authError||!authData?.user) throw new Error('Your login session has expired. Please sign in again.');
+    const studentId=authData.user.id;
 
-    let score = 0;
-
-    const review = q.questions.map((x,i)=>{
-      const given = LIVE_QUIZ_STATE.answers[i];
-      const ok = given === Number(x.answer);
-
+    let score=0;
+    const review=q.questions.map((x,i)=>{
+      const given=st.answers[i];
+      const ok=given===Number(x.answer);
       if(ok) score++;
-
-      return {
-        question: x.text,
-        given: given == null ? null : x.options[given],
-        correct: x.options[Number(x.answer)],
-        explanation: x.explanation,
-        ok
-      };
+      return {question:x.text,given:given==null?null:x.options[given],correct:x.options[Number(x.answer)],explanation:x.explanation,ok};
     });
 
-    const submittedAt = Date.now();
+    // Freeze these once so a retry saves exactly the same attempt.
+    st.submittedAtMs=st.submittedAtMs||Date.now();
+    st.attemptId=st.attemptId||quizNewUuid();
+    const submittedAt=st.submittedAtMs;
+    const timeTakenSec=Math.max(0,Math.round((submittedAt-st.startedAt)/1000));
+    const total=q.questions.length;
+    const percentage=total?Math.round((score/total)*100):0;
+    const marksPerQuestion=Number(q.marksPerQuestion||1);
+    const scoreMarks=score*marksPerQuestion;
+    const totalMarks=total*marksPerQuestion;
+    const quizId=q.supabaseId||q.id;
+    if(!quizId) throw new Error('Supabase quiz ID is missing.');
 
-    const timeTakenSec = Math.max(
-      0,
-      Math.round(
-        (submittedAt - LIVE_QUIZ_STATE.startedAt) / 1000
-      )
-    );
+    const {data:dbQuestions,error:questionError}=await sb
+      .from('quiz_questions').select('id,display_order')
+      .eq('quiz_id',quizId).order('display_order',{ascending:true});
+    if(questionError) throw questionError;
+    if(!dbQuestions||dbQuestions.length!==total)
+      throw new Error('Quiz questions could not be matched with the Supabase quiz.');
 
-    const total = q.questions.length;
-
-    const percentage = total
-      ? Math.round((score / total) * 100)
-      : 0;
-
-    const marksPerQuestion =
-      Number(q.marksPerQuestion || 1);
-
-    const scoreMarks =
-      score * marksPerQuestion;
-
-    const totalMarks =
-      total * marksPerQuestion;
-
-    const quizId =
-      q.supabaseId || q.id;
-
-    if(!quizId){
-      throw new Error('Supabase quiz ID is missing.');
+    // 1) attempt row — client-generated id makes a retry idempotent (23505 = already saved)
+    if(!st.attemptSaved){
+      const {error:attemptError}=await sb.from('quiz_attempts').insert([{
+        id:st.attemptId,
+        quiz_id:quizId,
+        student_id:studentId,
+        started_at:new Date(st.startedAt).toISOString(),
+        submitted_at:new Date(submittedAt).toISOString(),
+        score:scoreMarks,
+        total_marks:totalMarks,
+        percentage:percentage,
+        time_taken_seconds:timeTakenSec,
+        auto_submitted:!!auto
+      }]);
+      if(attemptError && attemptError.code!=='23505') throw attemptError;
+      st.attemptSaved=true;
     }
 
-    /* Get the actual Supabase question IDs */
-    const { data: dbQuestions, error: questionError } =
-      await sb
-        .from('quiz_questions')
-        .select(`
-          id,
-          display_order
-        `)
-        .eq('quiz_id', quizId)
-        .order('display_order', {ascending:true});
-
-    if(questionError){
-      throw new Error(questionError.message);
-    }
-
-    if(!dbQuestions || dbQuestions.length !== total){
-      throw new Error(
-        'Quiz questions could not be matched with the Supabase quiz.'
-      );
-    }
-
-    /* Create the quiz attempt */
-    const { data: attempt, error: attemptError } =
-      await sb
-        .from('quiz_attempts')
-        .insert([{
-          quiz_id: quizId,
-          student_id: studentId,
-          started_at: new Date(
-            LIVE_QUIZ_STATE.startedAt
-          ).toISOString(),
-          submitted_at: new Date(
-            submittedAt
-          ).toISOString(),
-          score: scoreMarks,
-          total_marks: totalMarks,
-          percentage: percentage,
-          time_taken_seconds: timeTakenSec,
-          auto_submitted: !!auto
-        }])
-        .select()
-        .single();
-
-    if(attemptError){
-      throw new Error(attemptError.message);
-    }
-
-    /* Save every selected answer */
-    const answerRows = dbQuestions.map((dbQuestion, index)=>{
-      const selectedIndex =
-        LIVE_QUIZ_STATE.answers[index];
-
-      const selectedAnswer =
-        selectedIndex == null
-          ? null
-          : ['A','B','C','D'][Number(selectedIndex)];
-
-      const isCorrect =
-        selectedIndex != null &&
-        Number(selectedIndex) ===
-        Number(q.questions[index].answer);
-
-      return {
-        attempt_id: attempt.id,
-        question_id: dbQuestion.id,
-        selected_answer: selectedAnswer,
-        is_correct: isCorrect
-      };
-    });
-
-    if(answerRows.length){
-      const { error: answerError } =
-        await sb
-          .from('quiz_answers')
-          .insert(answerRows);
-
-      if(answerError){
-        throw new Error(answerError.message);
+    // 2) answers
+    if(!st.answersSaved){
+      const answerRows=dbQuestions.map((dbQ,index)=>{
+        const sel=st.answers[index];
+        return {
+          attempt_id:st.attemptId,
+          question_id:dbQ.id,
+          selected_answer:sel==null?null:['A','B','C','D'][Number(sel)],
+          is_correct:sel!=null&&Number(sel)===Number(q.questions[index].answer)
+        };
+      });
+      if(answerRows.length){
+        const {error:answerError}=await sb.from('quiz_answers').insert(answerRows);
+        if(answerError && answerError.code!=='23505') throw answerError;
       }
+      st.answersSaved=true;
     }
 
-    const result = {
-      resultType: 'live_quiz',
-      quizId: quizId,
-      quizTitle: q.title,
-      studentId: studentId,
-      studentName:
-        CURRENT_USER?.name ||
-        CURRENT_USER?.displayName ||
-        '',
-      score: score,
-      total: total,
-      percentage: percentage,
-      timeTakenSec: timeTakenSec,
-      autoSubmitted: !!auto,
-      submittedAt: submittedAt,
-      attemptId: attempt.id
+    // 3) confirm the row really exists in Supabase before showing success
+    const {data:saved,error:confirmError}=await sb.from('quiz_attempts')
+      .select('id').eq('id',st.attemptId).maybeSingle();
+    if(confirmError) throw confirmError;
+    if(!saved) throw new Error('The attempt could not be confirmed in the database.');
+
+    LIVE_QUIZ_RESULT={
+      resultType:'live_quiz',quizId:quizId,quizTitle:q.title,studentId:studentId,
+      studentName:CURRENT_USER?.name||CURRENT_USER?.displayName||'',
+      score:score,total:total,percentage:percentage,timeTakenSec:timeTakenSec,
+      autoSubmitted:!!auto,submittedAt:submittedAt,attemptId:st.attemptId,review
     };
-
-    /* Keep detailed review for the immediate result screen */
-    LIVE_QUIZ_RESULT = {
-      ...result,
-      review
-    };
-
-    LIVE_QUIZ_STATE = null;
-    LIVE_QUIZ_VIEW = 'result';
-
+    LIVE_QUIZ_STATE=null;
+    LIVE_QUIZ_VIEW='result';
+    LIVE_QUIZ_SUBMITTING=false;
+    quizSaveOverlay(null);
     render();
+    toast('Quiz result saved successfully.');
 
-    toast('Quiz result submitted successfully.');
+    // refresh "My Quiz Results" from Supabase in the background
+    MY_QUIZ_RESULTS_LOADED=false;
+    loadMyQuizResults();
 
   }catch(e){
-    console.error(
-      'Supabase quiz result submission failed:',
-      e
-    );
-
-    toast(
-      'Could not submit quiz result: ' +
-      (e.message || e)
+    console.error('Supabase quiz result submission failed:',e);
+    LIVE_QUIZ_SUBMITTING=false;
+    const safe=esc(quizFriendlyError(e));
+    quizSaveOverlay(
+      '<b style="color:var(--absent)">Could not save your quiz</b>'+
+      '<div class="qmeta" style="margin:8px 0 12px;word-break:break-word">'+safe+'</div>'+
+      '<button class="btn btn-primary btn-block" onclick="submitLiveQuiz('+(auto?'true':'false')+')">Retry saving</button>'+
+      '<button class="btn btn-block" style="margin-top:8px" onclick="quizSaveOverlay(null)">Close</button>'
     );
   }
 }
 
 function renderLiveQuizResult(){const r=LIVE_QUIZ_RESULT;return `<h2 class="pagetitle">Quiz Result</h2><div class="card"><div class="quiz-score-circle"><b>${r.score}/${r.total}</b><span>${Math.round(r.score/r.total*100)}%</span></div><p class="quiz-motivation">${r.score===r.total?'Excellent work.':r.score>=r.total*.7?'Good performance.':'Review the explanations and strengthen the weak areas.'}</p>${r.review.map((x,i)=>`<div class="quiz-review-row"><span class="qr-ic">${x.ok?'✓':'✕'}</span><div><b>Q${i+1}.</b> ${esc(x.question)}<div style="margin-top:3px">Your answer: ${esc(x.given||'Not answered')}</div><div>Correct answer: ${esc(x.correct)}</div><div style="color:var(--ink-soft);margin-top:3px">${esc(x.explanation)}</div></div></div>`).join('')}</div><button class="btn btn-primary btn-block" onclick="LIVE_QUIZ_VIEW='home';render();">Back to Quiz</button>`;}
 
+let MY_QUIZ_RESULTS=[];
+let MY_QUIZ_RESULTS_LOADING=false;
+let MY_QUIZ_RESULTS_LOADED=false;
+let MY_QUIZ_RESULTS_ERROR='';
+let MY_QUIZ_RESULTS_UID=null;
+
+function myQuizResultsRerender(){
+  if(typeof TAB!=='undefined' && TAB==='quiz' && LIVE_QUIZ_VIEW==='scores') render();
+}
+
+/* Loads the signed-in student's own attempts from Supabase.
+   Keyed on the Supabase auth user id (quiz_attempts.student_id), NOT the roll number.
+   On failure it keeps the error visible instead of silently showing an empty list. */
+async function loadMyQuizResults(){
+  if(MY_QUIZ_RESULTS_LOADING) return false;
+  MY_QUIZ_RESULTS_LOADING=true;
+  MY_QUIZ_RESULTS_ERROR='';
+  myQuizResultsRerender();
+  try{
+    const sb=window.supabaseClient;
+    if(!sb) throw new Error('Supabase connection is not available.');
+    const {data:au,error:ae}=await sb.auth.getUser();
+    if(ae||!au?.user) throw new Error('Your login session has expired. Please sign in again.');
+    const uid=au.user.id;
+    if(MY_QUIZ_RESULTS_UID!==uid){ MY_QUIZ_RESULTS=[]; MY_QUIZ_RESULTS_UID=uid; }
+
+    const {data,error}=await sb.from('quiz_attempts')
+      .select('id,quiz_id,student_id,submitted_at,score,total_marks,percentage,time_taken_seconds,auto_submitted')
+      .eq('student_id',uid)
+      .not('submitted_at','is',null)
+      .order('submitted_at',{ascending:false});
+    if(error) throw error;
+
+    const rows=data||[];
+    const titles={}, ends={};
+    const ids=[...new Set(rows.map(r=>r.quiz_id).filter(Boolean))];
+    if(ids.length){
+      const {data:qs}=await sb.from('quizzes').select('id,title,end_at').in('id',ids);
+      (qs||[]).forEach(x=>{titles[x.id]=x.title; ends[x.id]=x.end_at?new Date(x.end_at).getTime():null;});
+    }
+    MY_QUIZ_RESULTS=rows.map(r=>{
+      const total=Number(r.total_marks)||0, score=Number(r.score)||0;
+      return {
+        id:r.id,quizId:r.quiz_id,quizTitle:titles[r.quiz_id]||'Quiz', endAt:ends[r.quiz_id]||null,
+        score:score,total:total,
+        percentage:r.percentage!=null?Number(r.percentage):(total?Math.round(score/total*100):0),
+        timeTakenSec:Number(r.time_taken_seconds)||0,
+        autoSubmitted:!!r.auto_submitted,
+        submittedAt:r.submitted_at?new Date(r.submitted_at).getTime():null
+      };
+    });
+    MY_QUIZ_RESULTS_LOADED=true;
+    return true;
+  }catch(e){
+    console.error('My quiz results load failed:',e);
+    MY_QUIZ_RESULTS_ERROR=(e&&e.message)||String(e);   // previous rows are kept, not wiped
+    return false;
+  }finally{
+    MY_QUIZ_RESULTS_LOADING=false;
+    myQuizResultsRerender();
+  }
+}
+
 function renderLiveQuizScores(){
-  const myId = String(
-    CURRENT_USER?.studentId ||
-    CURRENT_USER?.id ||
-    ''
-  );
-
-  const mine = (Array.isArray(QUIZ_RESULTS) ? QUIZ_RESULTS : [])
-    .filter(r => String(r.studentId || '') === myId)
-    .sort(
-      (a,b) =>
-        (Number(b.submittedAt) || 0) -
-        (Number(a.submittedAt) || 0)
-    );
-
+  const me=CURRENT_USER?.authUserId||null;
+  if(me && MY_QUIZ_RESULTS_UID!==me){            // different student signed in: drop old data
+    MY_QUIZ_RESULTS=[]; MY_QUIZ_RESULTS_LOADED=false; MY_QUIZ_RESULTS_ERROR=''; MY_QUIZ_RESULTS_UID=me;
+  }
+  if(!MY_QUIZ_RESULTS_LOADED && !MY_QUIZ_RESULTS_LOADING && !MY_QUIZ_RESULTS_ERROR){
+    setTimeout(loadMyQuizResults,0);
+  }
+  const rows=MY_QUIZ_RESULTS;
+  const fmtT=s=>s?`${Math.floor(s/60)}m ${s%60}s`:'—';
+  let body;
+  if(MY_QUIZ_RESULTS_LOADING && !MY_QUIZ_RESULTS_LOADED && !rows.length){
+    body='<div class="empty">Loading your results…</div>';
+  }else if(MY_QUIZ_RESULTS_ERROR && !rows.length){
+    body=`<div class="empty" style="color:var(--absent)">Could not load your results.<br><span style="font-size:12px;word-break:break-word">${esc(MY_QUIZ_RESULTS_ERROR)}</span></div>
+      <button class="btn btn-primary btn-block" style="margin-top:10px" onclick="MY_QUIZ_RESULTS_ERROR='';loadMyQuizResults()">Retry</button>`;
+  }else if(!rows.length){
+    body='<div class="empty">You have not attempted any quizzes yet. Your results will appear here after you submit one.</div>';
+  }else{
+    body=`${MY_QUIZ_RESULTS_ERROR?`<div class="banner-tip" style="color:var(--absent)">Could not refresh: ${esc(MY_QUIZ_RESULTS_ERROR)} — showing last loaded results. <a class="link-btn" onclick="MY_QUIZ_RESULTS_ERROR='';loadMyQuizResults()">Retry</a></div>`:''}
+      <table class="score-table"><thead><tr><th>Quiz</th><th>Score</th><th>%</th><th>Time</th><th>Date & Time</th></tr></thead><tbody>
+      ${rows.map(r=>`<tr>
+        <td>${esc(r.quizTitle)}${r.autoSubmitted?' <span class="qmeta">(auto-submitted)</span>':''}<br><button class="btn btn-primary btn-sm" style="margin-top:6px" onclick="openMyQuizReview('${esc(r.id)}')">📖 Review</button></td>
+        <td>${r.score}/${r.total}</td>
+        <td><b>${r.percentage}%</b></td>
+        <td>${fmtT(r.timeTakenSec)}</td>
+        <td>${r.submittedAt?new Date(r.submittedAt).toLocaleString():'—'}</td></tr>`).join('')}
+      </tbody></table>`;
+  }
   return `<h2 class="pagetitle">My Quiz Results</h2>
     <p class="pagesub">Your submitted quiz attempts.</p>
-    <p><a class="link-btn" onclick="LIVE_QUIZ_VIEW='home';render();">← Back to Quiz</a></p>
-    <div class="card" style="overflow-x:auto;">
-      ${mine.length ? `
-      <table class="score-table">
-        <thead>
-          <tr>
-            <th>Quiz</th>
-            <th>Score</th>
-            <th>%</th>
-            <th>Date & Time</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${mine.map(r => `
-            <tr>
-              <td>${esc(r.quizTitle || 'Quiz')}</td>
-              <td>${Number(r.score) || 0}/${Number(r.total) || 0}</td>
-              <td>
-                <b>${Number(r.percentage || 0)}%</b>
-              </td>
-              <td>
-                ${r.submittedAt
-                  ? new Date(Number(r.submittedAt)).toLocaleString()
-                  : '—'}
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-      ` : `
-        <div class="empty">No quiz results yet.</div>
-      `}
-    </div>
-    <button class="btn btn-block"
-      onclick="LIVE_QUIZ_VIEW='home';render();">
-      Back to Quiz
-    </button>`;
+    <p><a class="link-btn" onclick="LIVE_QUIZ_VIEW='home';render();">← Back to Quiz</a> ·
+       <a class="link-btn" onclick="MY_QUIZ_RESULTS_ERROR='';loadMyQuizResults()">↻ Refresh</a></p>
+    <div class="card" style="overflow-x:auto;">${body}</div>
+    <button class="btn btn-block" onclick="LIVE_QUIZ_VIEW='home';render();">Back to Quiz</button>`;
+}
+
+/* ===== Student: review a past attempt (questions, own answer, correct answer) ===== */
+/* Set to true to hide the review until the quiz window has closed. */
+const REVIEW_AFTER_QUIZ_ENDS=false;
+let MY_QUIZ_REVIEW=null;
+
+async function openMyQuizReview(attemptId){
+  const r=MY_QUIZ_RESULTS.find(x=>String(x.id)===String(attemptId));
+  if(!r) return;
+  if(REVIEW_AFTER_QUIZ_ENDS && r.endAt && Date.now()<r.endAt){
+    toast('Review unlocks after the quiz closes on '+new Date(r.endAt).toLocaleString());
+    return;
+  }
+  const rv={attemptId:r.id,title:r.quizTitle,score:r.score,total:r.total,percentage:r.percentage,loading:true,error:'',rows:[],missing:0};
+  MY_QUIZ_REVIEW=rv; LIVE_QUIZ_VIEW='review'; render();
+  try{
+    const sb=window.supabaseClient;
+    if(!sb) throw new Error('Supabase connection is not available.');
+    const {data:ans,error:ae}=await sb.from('quiz_answers').select('question_id,selected_answer').eq('attempt_id',r.id);
+    if(ae) throw ae;
+    const ids=(ans||[]).map(a=>a.question_id);
+    let qs=[];
+    if(ids.length){
+      const {data,error}=await sb.from('quiz_questions')
+        .select('id,question_text,option_a,option_b,option_c,option_d,correct_answer,explanation,display_order')
+        .in('id',ids);
+      if(error) throw error;
+      qs=data||[];
+    }
+    const byId={}; qs.forEach(q=>{byId[q.id]=q;});
+    rv.rows=(ans||[]).map(a=>byId[a.question_id]?{q:byId[a.question_id],sel:a.selected_answer}:null)
+      .filter(Boolean).sort((x,y)=>(Number(x.q.display_order)||0)-(Number(y.q.display_order)||0));
+    rv.missing=(ans||[]).length-rv.rows.length;
+  }catch(e){
+    console.error('Quiz review load failed:',e);
+    rv.error=(e&&e.message)||String(e);
+  }
+  rv.loading=false;
+  if(MY_QUIZ_REVIEW===rv && LIVE_QUIZ_VIEW==='review') render();
+}
+
+function renderMyQuizReview(){
+  const rv=MY_QUIZ_REVIEW;
+  const back=`<p><a class="link-btn" onclick="LIVE_QUIZ_VIEW='scores';render();">← Back to My Results</a></p>`;
+  if(!rv) return back;
+  let body;
+  if(rv.loading){
+    body='<div class="empty">Loading review…</div>';
+  }else if(rv.error){
+    body=`<div class="empty" style="color:var(--absent)">Could not load the review.<br><span style="font-size:12px;word-break:break-word">${esc(rv.error)}</span></div>
+      <button class="btn btn-primary btn-block" style="margin-top:10px" onclick="openMyQuizReview('${esc(rv.attemptId)}')">Retry</button>`;
+  }else if(!rv.rows.length){
+    body='<div class="empty">Review is not available for this attempt. The quiz may have been edited after you took it.</div>';
+  }else{
+    const L=['A','B','C','D'];
+    body=(rv.missing>0?`<div class="banner-tip">${rv.missing} question(s) from this attempt no longer exist because the quiz was edited.</div>`:'')+
+    rv.rows.map((x,i)=>{
+      const q=x.q, opts=[q.option_a,q.option_b,q.option_c,q.option_d];
+      const ok=x.sel!=null && x.sel===q.correct_answer;
+      return `<div class="quiz-review-row" style="display:block;">
+        <div><span class="qr-ic">${x.sel==null?'–':(ok?'✓':'✕')}</span> <b>Q${i+1}.</b> ${esc(q.question_text)}</div>
+        ${opts.map((o,j)=>{
+          const isC=L[j]===q.correct_answer, isS=L[j]===x.sel;
+          return `<div style="margin:3px 0 0 18px;${isC?'color:var(--present);font-weight:700;':(isS?'color:var(--absent);':'')}">${L[j]}. ${esc(o)}${isC?' ✓ correct':''}${isS&&!isC?' ✕ your answer':''}${isS&&isC?' (your answer)':''}</div>`;
+        }).join('')}
+        ${x.sel==null?'<div style="margin:3px 0 0 18px;color:var(--ink-soft)">Not answered</div>':''}
+        ${q.explanation?`<div style="margin:5px 0 0 18px;color:var(--ink-soft)">${esc(q.explanation)}</div>`:''}
+      </div>`;
+    }).join('');
+  }
+  return `<h2 class="pagetitle">Review: ${esc(rv.title)}</h2>
+    <p class="pagesub">Score ${rv.score}/${rv.total} (${rv.percentage}%)</p>${back}
+    <div class="card">${body}</div>`;
 }
 
 async function loadAdminLiveQuizResults(){
@@ -5223,6 +5289,8 @@ async function loadAdminLiveQuizResults(){
           ← Back to Quiz Management
         </a>
       </p>
+      ${groupList.length?`<button class="btn btn-block" style="margin-bottom:12px"
+        onclick="exportQuizResultsExcel(null)">⬇️ Export ALL quizzes (Excel, one sheet per quiz)</button>`:''}
 
       ${
         groupList.length
@@ -5246,6 +5314,10 @@ async function loadAdminLiveQuizResults(){
                 <div class="section-label">
                   📝 ${esc(group.quizTitle)}
                 </div>
+                <button class="btn btn-primary btn-sm" style="margin:4px 0 8px"
+                  onclick="exportQuizResultsExcel('${esc(group.quizId)}')">
+                  ⬇️ Export this quiz (Excel)
+                </button>
 
                 <div
                   class="qmeta"
@@ -5442,6 +5514,114 @@ async function loadAdminLiveQuizResults(){
 
 let ADMIN_QUIZ_RESULTS_HTML = '';
 let ADMIN_QUIZ_RESULTS_LOADING = false;
+
+/* ===== Admin: export quiz results to Excel (reads fresh data from Supabase) ===== */
+let QUIZ_XLSX_P=null;
+function loadQuizXlsxLib(){
+  if(window.XLSX) return Promise.resolve(window.XLSX);
+  if(!QUIZ_XLSX_P) QUIZ_XLSX_P=new Promise((res,rej)=>{
+    const sc=document.createElement('script');
+    sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload=()=>res(window.XLSX);
+    sc.onerror=()=>{QUIZ_XLSX_P=null;rej(new Error('Excel library could not be loaded (check internet).'));};
+    document.head.appendChild(sc);
+  });
+  return QUIZ_XLSX_P;
+}
+
+let QUIZ_EXPORTING=false;
+async function exportQuizResultsExcel(quizId){
+  if(!requireAdmin()) return;
+  if(QUIZ_EXPORTING) return;
+  QUIZ_EXPORTING=true;
+  toast('Preparing Excel file…');
+  try{
+    const sb=window.supabaseClient;
+    if(!sb) throw new Error('Supabase connection is not available.');
+
+    let aq=sb.from('quiz_attempts')
+      .select('id,quiz_id,student_id,score,total_marks,percentage,time_taken_seconds,submitted_at,auto_submitted')
+      .not('submitted_at','is',null)
+      .order('submitted_at',{ascending:false});
+    if(quizId) aq=aq.eq('quiz_id',quizId);
+    const {data:attempts,error:e1}=await aq;
+    if(e1) throw e1;
+
+    const {data:quizzes,error:e2}=await sb.from('quizzes').select('id,title');
+    if(e2) throw e2;
+    // all students (including inactive) so every name resolves
+    const {data:students,error:e3}=await sb.from('students').select('id,name,section,auth_user_id');
+    if(e3) throw e3;
+
+    if(!attempts||!attempts.length) throw new Error('No submitted attempts to export.');
+
+    const qTitle={}; (quizzes||[]).forEach(q=>{qTitle[q.id]=q.title||'Quiz';});
+    const stByAuth={}; (students||[]).forEach(x=>{if(x.auth_user_id) stByAuth[x.auth_user_id]=x;});
+    const pad=n=>String(n).padStart(2,'0');
+    const mmss=sec=>Math.floor(sec/60)+':'+pad(sec%60);
+
+    const groups={};
+    attempts.forEach(a=>{(groups[a.quiz_id]=groups[a.quiz_id]||[]).push(a);});
+
+    const header=['#','Student Name','Student ID / Roll','Section','Quiz','Score (marks)','Total Marks','Percentage (%)','Time Taken (mm:ss)','Time Taken (sec)','Submitted At','Auto-submitted'];
+    const sheets=[]; const summary=[['Quiz','Submissions','Average %','Highest %','Lowest %']];
+    Object.keys(groups).forEach(qid=>{
+      const rows=groups[qid].slice().sort((x,y)=>String(stByAuth[x.student_id]?.id||'').localeCompare(String(stByAuth[y.student_id]?.id||''),undefined,{numeric:true}));
+      const title=qTitle[qid]||'Unknown Quiz';
+      const data=rows.map((a,i)=>{
+        const st=stByAuth[a.student_id];
+        const score=Number(a.score)||0,total=Number(a.total_marks)||0;
+        const pct=a.percentage!=null?Number(a.percentage):(total?Math.round(score/total*100):0);
+        const sec=Number(a.time_taken_seconds)||0;
+        return [i+1,st?.name||'Unknown Student',st?.id!=null?String(st.id):'—',st?.section||'—',title,score,total,pct,mmss(sec),sec,
+          a.submitted_at?new Date(a.submitted_at).toLocaleString():'—',a.auto_submitted?'Yes':'No'];
+      });
+      const pcts=data.map(r=>r[7]);
+      summary.push([title,data.length,Math.round(pcts.reduce((x,y)=>x+y,0)/pcts.length*10)/10,Math.max(...pcts),Math.min(...pcts)]);
+      sheets.push({title,data});
+    });
+
+    const stamp=new Date().toISOString().slice(0,10);
+    const safe=t=>String(t).replace(/[^\w\-]+/g,'_').slice(0,40);
+    const fileBase=quizId?`Acadcom_${safe(sheets[0].title)}_Results_${stamp}`:`Acadcom_Quiz_Results_${stamp}`;
+
+    let X=null;
+    try{ X=await loadQuizXlsxLib(); }catch(err){ console.warn(err); }
+
+    if(X){
+      const wb=X.utils.book_new();
+      if(!quizId && sheets.length>1){
+        const ws=X.utils.aoa_to_sheet(summary); ws['!cols']=[{wch:32},{wch:12},{wch:11},{wch:11},{wch:11}];
+        X.utils.book_append_sheet(wb,ws,'Summary');
+      }
+      const used={Summary:1};
+      sheets.forEach(sh=>{
+        let name=sh.title.replace(/[\[\]\:\*\?\/\\]/g,' ').trim().slice(0,28)||'Quiz';
+        let n=name,k=2; while(used[n]){ n=name.slice(0,26)+' '+k++; } used[n]=1;
+        const ws=X.utils.aoa_to_sheet([header,...sh.data]);
+        ws['!cols']=[{wch:5},{wch:26},{wch:16},{wch:9},{wch:26},{wch:13},{wch:11},{wch:14},{wch:17},{wch:15},{wch:22},{wch:13}];
+        X.utils.book_append_sheet(wb,ws,n);
+      });
+      X.writeFile(wb,fileBase+'.xlsx');
+      toast('Excel file downloaded.');
+    }else{
+      // fallback: CSV (opens in Excel)
+      const q=v=>'"'+String(v).replace(/"/g,'""')+'"';
+      const lines=[];
+      sheets.forEach(sh=>{ lines.push(header.map(q).join(',')); sh.data.forEach(r=>lines.push(r.map(q).join(','))); lines.push(''); });
+      const blob=new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv;charset=utf-8'});
+      const url=URL.createObjectURL(blob), el=document.createElement('a');
+      el.href=url; el.download=fileBase+'.csv'; document.body.appendChild(el); el.click(); el.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),2000);
+      toast('Excel library unavailable — downloaded as CSV (opens in Excel).');
+    }
+  }catch(e){
+    console.error('Quiz export failed:',e);
+    toast('Export failed: '+((e&&e.message)||e));
+  }finally{
+    QUIZ_EXPORTING=false;
+  }
+}
 
 function renderAdminLiveQuizResults(){
 
@@ -5800,6 +5980,15 @@ function renderSubjectsDB() {
               ✎
             </button>
 
+            <button
+              class="icon-btn acx-delbtn"
+              title="Delete subject"
+              aria-label="Delete subject ${esc(s.name)}"
+              style="color:var(--absent)"
+              onclick="acxDeleteSubject('${s.id}')">
+              🗑
+            </button>
+
           </div>
         `).join('')
 
@@ -5904,6 +6093,8 @@ function openSubjectForm(id) {
         Save Subject
 
       </button>
+
+      ${s ? `<button class="btn btn-danger btn-block acx-delbtn" onclick="acxDeleteSubject('${s.id}')">Delete Subject</button>` : ''}
 
     </div>
 
@@ -6841,10 +7032,23 @@ async function loadSupabaseAttendance() {
 
   try {
 
-    const { data, error } = await supabaseClient
-      .from('attendance')
-      .select('*')
-      .order('attendance_date', { ascending: true });
+    /* Page through ALL rows: Supabase returns at most 1,000 rows per request, which would
+       silently truncate a semester of attendance and corrupt every percentage. */
+    const PAGE = 1000;
+    let data = [];
+    let error = null;
+    for (let from = 0; ; from += PAGE) {
+      const page = await supabaseClient
+        .from('attendance')
+        .select('*')
+        .order('attendance_date', { ascending: true })
+        .order('session_id', { ascending: true })
+        .order('student_id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (page.error) { error = page.error; break; }
+      data = data.concat(page.data || []);
+      if (!page.data || page.data.length < PAGE) break;
+    }
 
     if (error) {
       console.error(
@@ -9937,6 +10141,9 @@ function renderQuizRoot(){
   if(LIVE_QUIZ_VIEW === 'scores'){
     return renderLiveQuizScores();
   }
+  if(LIVE_QUIZ_VIEW === 'review'){
+    return renderMyQuizReview();
+  }
   if(LIVE_QUIZ_VIEW === 'results' && CURRENT_USER?.role === 'admin'){
     return renderAdminLiveQuizResults();
   }
@@ -9959,6 +10166,9 @@ function renderQuizRoot(){
       <div class="btn-row" style="margin-bottom:12px">
         <button class="btn btn-primary" onclick="openLiveQuizBuilder()">
           ＋ Create Quiz
+        </button>
+        <button class="btn" onclick="openQuizPdfImport()">
+          📄 Import Quiz (PDF)
         </button>
         <button class="btn" onclick="finalQuizRefresh()">
           ↻ Refresh
@@ -10023,6 +10233,662 @@ setTab = function(tab){
   return __finalOldSetTab(tab);
 };
 </script>
+
+<!-- ===== QUIZ PDF IMPORT (additive module) ===== -->
+<style id="qpi-style">
+/* Quiz PDF Import — scoped styles (all selectors prefixed qpi-) */
+.qpi-drop{border:1.5px dashed var(--rule);border-radius:12px;padding:16px;background:var(--paper-alt);margin:8px 0 12px;font-size:12.5px;color:var(--ink-soft);line-height:1.5}
+.qpi-drop input[type=file]{width:100%;margin-top:8px;font-size:13px}
+.qpi-status{font-size:12.5px;color:var(--ink);padding:10px 12px;border-radius:10px;background:var(--paper-alt);margin:8px 0;line-height:1.5;word-break:break-word}
+.qpi-status.err{border:1px solid var(--absent,#c0392b);color:var(--absent,#c0392b)}
+.qpi-bar{height:6px;border-radius:4px;background:var(--rule);overflow:hidden;margin-top:8px}
+.qpi-bar>i{display:block;height:100%;width:0;background:var(--seal);transition:width .2s}
+.qpi-sum{position:sticky;top:-1px;z-index:2;background:var(--surface);padding:8px 0;margin:6px 0;border-bottom:1px solid var(--rule);font-size:12.5px;line-height:1.5}
+.qpi-q{border:1px solid var(--rule);border-radius:12px;padding:12px;margin:10px 0;background:var(--paper-alt)}
+.qpi-q.bad{border-color:var(--absent,#c0392b)}
+.qpi-qh{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.qpi-q textarea,.qpi-q input[type=text]{width:100%;box-sizing:border-box;font:inherit;font-size:13px}
+.qpi-opt{display:grid;grid-template-columns:44px minmax(0,1fr);gap:7px;align-items:center;margin:6px 0}
+.qpi-opt label{display:flex;align-items:center;gap:4px;font-weight:700;margin:0;cursor:pointer}
+.qpi-opt input[type=radio]{width:auto;margin:0}
+.qpi-tag{display:inline-block;font-size:10.5px;line-height:1.3;border-radius:8px;padding:2px 7px;margin:2px 4px 2px 0}
+.qpi-tag.b{background:var(--absent,#c0392b);color:#fff}
+.qpi-tag.w{background:#f3e3b3;color:#6b4e00}
+.qpi-grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+@media(max-width:650px){.qpi-grid2{grid-template-columns:1fr}}
+.qpi-grid2 label{font-size:12px}.qpi-grid2 input{width:100%;box-sizing:border-box}
+.qpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+@media(max-width:650px){.qpi-grid{grid-template-columns:1fr}}
+.qpi-ack{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;margin:10px 0}
+.qpi-ack input{margin-top:3px}
+</style>
+<script>
+/* ============================================================================
+   QUIZ PDF IMPORT  (additive module — touches nothing else)
+   - Admin-only. Runs 100% in the browser: no server, no new secrets.
+   - PDF text via pdf.js, OCR (scanned pages only) via tesseract.js; both are
+     loaded lazily from jsDelivr, pinned to exact versions + SRI hash.
+   - Saves through the EXISTING writeLiveQuizzes()/loadLiveQuizzes() path, so it
+     writes to the same `quizzes` + `quiz_questions` tables as "Create Quiz",
+     with the same RLS. Saved as DRAFT; publish with the existing Publish flow.
+   ============================================================================ */
+(function(){
+'use strict';
+
+var MAX_Q = 20, MAX_BYTES = 10*1024*1024, MAX_PAGES = 30, OCR_MIN_CHARS = 40;
+var LIBS = {
+  pdf:    {src:'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
+           sri:'sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e'},
+  worker: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js',
+  tess:   {src:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+           sri:'sha384-GJqSu7vueQ9qN0E9yLPb3Wtpd7OrgK8KmYzC8T1IysG1bcvxvIO4qtYR/D3A991F'}
+};
+
+function E(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+/* ───────────────────────── PARSER (pure functions) ───────────────────────── */
+
+function cleanLine(s){
+  return String(s||'')
+    .replace(/[\u00AD\u200B-\u200D\uFEFF]/g,'')
+    .replace(/\u00A0/g,' ')
+    .replace(/\uFB00/g,'ff').replace(/\uFB01/g,'fi').replace(/\uFB02/g,'fl').replace(/\uFB03/g,'ffi').replace(/\uFB04/g,'ffl')
+    .replace(/[ \t]+/g,' ').trim();
+}
+
+var RE_KEY_HEAD = /^\s*(?:answer\s*key|answers?\s*key|answers?|answer\s*sheet|key|correct\s*answers?|solutions?)\s*[:.\-–—]*\s*$/i;
+var RE_PAIR_G   = /(?:^|[\s,;|(])(?:Q(?:uestion)?\.?\s*)?(\d{1,3})\s*[.):\-–—=]?\s*\(?\s*([A-Da-d])\s*\)?(?=$|[\s,;|.)])/g;
+var RE_PAIR_LEAD= /^\s*(?:Q(?:uestion)?\.?\s*)?(\d{1,3})\s*[.):\-–—=]?\s*\(?\s*([A-Da-d])\s*\)?(?=$|[\s,;|.)\-–—:])\s*[:.\-–—)]*\s*(.*)$/;
+var RE_QSTART   = /^\s*(?:Q(?:uestion)?\.?\s*(\d{1,3})(?:\s*[.):\-–—])?|(\d{1,3})\s*[.):\-–—])(?=\s|$)\s*(.*)$/i;
+var RE_ANS      = /^\s*(?:correct\s+)?(?:answer|ans)\b\.?\s*(?:is\b)?\s*[:\-–—=]?\s*\(?([A-Da-d])\)?(?=[\s.,;:)]|$)\s*(.*)$/i;
+var RE_EXPL     = /^\s*(?:explanation|solution|sol\.?|rationale|reason|exp\.?)\s*[:\-–—.]\s*(.*)$/i;
+var RE_OPT_1    = /(^|\s)(?:\(([A-Ea-e])\)|([A-E])[.)]|([a-e])\))(?=\s|$)/;
+var RE_OPT_G    = /(^|\s)(?:\(([A-Ea-e])\)|([A-E])[.)]|([a-e])\))(?=\s|$)/g;
+
+function pairCount(line){
+  var t=line.trim(); if(!t) return 0;
+  var n=0, rest=t.replace(RE_PAIR_G,function(){n++;return ' ';});
+  return (n>0 && /^[\s,;|.\-–—:]*$/.test(rest)) ? n : 0;
+}
+
+/* Find the answer-key section. Returns {start, headed} or null. */
+function findKeySection(lines){
+  var i, last=-1;
+  for(i=0;i<lines.length;i++){ if(RE_KEY_HEAD.test(lines[i].t)) last=i; }
+  if(last>=0){
+    var n=0; for(i=last+1;i<lines.length;i++){ if(RE_PAIR_LEAD.test(lines[i].t)||pairCount(lines[i].t)) n++; }
+    if(n>=2) return {start:last, headed:true};
+  }
+  /* un-headed trailing block of pure key lines */
+  var total=0, first=-1;
+  for(i=lines.length-1;i>=0;i--){
+    var t=lines[i].t; if(!t) continue;
+    var c=pairCount(t);
+    if(c>0){ total+=c; first=i; } else break;
+  }
+  if(first>=0 && total>=3) return {start:first, headed:false};
+  return null;
+}
+
+function parseKey(lines, startIdx, headed){
+  var key={}, expl={}, conflicts={}, cur=null, i;
+  function put(n,l){ if(key[n]!=null && key[n]!==l){ conflicts[n]=true; } else key[n]=l; }
+  for(i=startIdx+(headed?1:0); i<lines.length; i++){
+    var t=lines[i].t; if(!t) continue;
+    var pc=pairCount(t);
+    if(pc>0){
+      RE_PAIR_G.lastIndex=0; var m;
+      while((m=RE_PAIR_G.exec(t))!==null){ put(+m[1], m[2].toUpperCase()); }
+      cur=null; continue;
+    }
+    var lead=RE_PAIR_LEAD.exec(t);
+    if(lead){ put(+lead[1], lead[2].toUpperCase()); cur=+lead[1]; if(lead[3]) expl[cur]=(expl[cur]?expl[cur]+' ':'')+lead[3]; continue; }
+    if(cur!=null) expl[cur]=(expl[cur]?expl[cur]+' ':'')+t;
+  }
+  Object.keys(conflicts).forEach(function(n){ key[n]=null; });
+  return {key:key, expl:expl, conflicts:conflicts};
+}
+
+/* Lenient marker form, used only when the strict pass cannot find all four options (typical of OCR: "A 1 B. 2 C.3") */
+var RE_OPT_LENIENT = /(^|\s)(?:\(([A-Da-d])\)|([A-D])(?:[.):]\s*|\s+))(?=\S)/g;
+
+function optionSplit(body){
+  var r=optionSplitWith(body, RE_OPT_G);
+  if(r.found<4){ var l=optionSplitWith(body, RE_OPT_LENIENT); if(l.found===4) return l; }
+  return r;
+}
+
+function optionSplitWith(body, RE){
+  var ms=[], m; RE.lastIndex=0;
+  while((m=RE.exec(body))!==null){
+    var L=(m[2]||m[3]||m[4]).toUpperCase();
+    ms.push({L:L, idx:m.index+m[1].length, end:m.index+m[0].length});
+  }
+  var order=['A','B','C','D'], best=null, a, k, j;
+  for(a=ms.length-1;a>=0;a--){
+    if(ms[a].L!=='A') continue;
+    var chain=[ms[a]], want=1, pos=a;
+    for(k=pos+1;k<ms.length && want<4;k++){ if(ms[k].L===order[want]){ chain.push(ms[k]); want++; } }
+    if(!best || chain.length>best.length) best=chain;   /* later 'A' wins ties */
+    if(chain.length===4) break;
+  }
+  var res={stem:body, options:['','','',''], found:0, extra:false};
+  if(!best) return res;
+  var ex=null;
+  for(j=0;j<ms.length;j++){ if(ms[j].L==='E' && ms[j].idx>best[best.length-1].idx){ ex=ms[j]; break; } }
+  res.stem=body.slice(0,best[0].idx);
+  for(j=0;j<best.length;j++){
+    var from=best[j].end, to=(j+1<best.length)?best[j+1].idx:(ex?ex.idx:body.length);
+    res.options[order.indexOf(best[j].L)]=body.slice(from,to);
+  }
+  res.found=best.length; res.extra=!!ex;
+  return res;
+}
+
+function flat(s){ return String(s||'').replace(/\s*\n\s*/g,' ').replace(/\s{2,}/g,' ').trim(); }
+
+function parseBlock(num, blockLines, keyInfo){
+  var body=[], expl=[], inline=[], mode='body', ocr=false, i;
+  for(i=0;i<blockLines.length;i++){
+    var t=blockLines[i].t; if(blockLines[i].ocr) ocr=true;
+    var a=RE_ANS.exec(t);
+    if(a){ inline.push(a[1].toUpperCase()); continue; }
+    var e=RE_EXPL.exec(t);
+    if(e){ mode='expl'; if(e[1]) expl.push(e[1]); continue; }
+    (mode==='expl'?expl:body).push(t);
+  }
+  var sp=optionSplit(body.join('\n'));
+  var notes=[], q={num:num, text:flat(sp.stem), options:sp.options.map(flat), answer:null, confidence:'none', explanation:flat(expl.join(' ')), notes:notes, ocr:ocr};
+
+  /* tick-mark answers (✓ ✔ ✅) — medium confidence */
+  var tick=-1;
+  q.options=q.options.map(function(o,idx){ if(/[\u2713\u2714\u2705]/.test(o)){ tick=idx; return o.replace(/[\u2713\u2714\u2705]/g,'').trim(); } return o; });
+
+  var uniqInline=inline.filter(function(v,ix){return inline.indexOf(v)===ix;});
+  var keyL=keyInfo? keyInfo.key[num] : undefined;
+  var keyConflict=keyInfo && keyInfo.conflicts[num];
+  var letters='ABCD';
+  if(uniqInline.length>1){ notes.push('Conflicting answers written under this question ('+uniqInline.join(' / ')+') — choose the correct one.'); }
+  else if(keyConflict){ notes.push('The answer key lists different answers for this question — choose the correct one.'); }
+  else if(uniqInline.length===1 && keyL && keyL!==uniqInline[0]){ notes.push('Answer conflict: question says '+uniqInline[0]+', answer key says '+keyL+' — choose the correct one.'); }
+  else if(uniqInline.length===1){ q.answer=letters.indexOf(uniqInline[0]); q.confidence='high'; }
+  else if(keyL){ q.answer=letters.indexOf(keyL); q.confidence='high'; }
+  else if(tick>=0){ q.answer=tick; q.confidence='medium'; notes.push('Answer taken from a tick mark in the PDF — please confirm.'); }
+  if(q.answer==null && !notes.length) notes.push('No answer found in the PDF — select the correct option.');
+  if(keyInfo && !q.explanation && keyInfo.expl[num]) q.explanation=flat(keyInfo.expl[num]);
+
+  if(sp.found<4) notes.push(sp.found? ('Only '+sp.found+' option(s) detected — fill in the rest.') : 'No options detected — enter A–D manually.');
+  if(sp.extra) notes.push('A 5th option (E) was found; Acadcom quizzes support A–D only, so E was left out.');
+  if(!q.text) notes.push('Question text is empty.');
+  if(q.text.length>0 && q.text.length<8) notes.push('Question text is very short — check it.');
+  if(q.text.length>1500) notes.push('Question text is unusually long — it may include neighbouring content.');
+  if(ocr) notes.push('Read with OCR — check wording, numbers and symbols.');
+  return q;
+}
+
+/* lines: [{t:string, ocr:boolean}] in reading order.  Returns {questions, count, keyFound, warnings} or {error:{code,message,count?}} */
+function parseLines(lines){
+  lines=lines.map(function(l){return {t:cleanLine(l.t), ocr:!!l.ocr};});
+  var warnings=[], ks=findKeySection(lines), keyInfo=null, qLines=lines;
+  if(ks){ keyInfo=parseKey(lines, ks.start, ks.headed); qLines=lines.slice(0, ks.start); }
+
+  /* locate question starts: sequential numbering only */
+  var cands=[], i, m;
+  for(i=0;i<qLines.length;i++){
+    m=RE_QSTART.exec(qLines[i].t);
+    if(m) cands.push({i:i, n:+(m[1]||m[2])});
+  }
+  var begin=cands.findIndex(function(c){return c.n===1;});
+  if(begin<0) begin=0;
+  var starts=[], last=null, blockHasOpts=function(upTo){
+    var from=starts.length?starts[starts.length-1].i:0, c=0, k;
+    for(k=from;k<upTo;k++){ if(/^\s*(?:\([A-Da-d]\)|[A-D][.)]|[a-d]\))\s/.test(qLines[k].t)) c++; }
+    return c>=3;
+  };
+  for(i=begin;i<cands.length;i++){
+    var c=cands[i];
+    if(last===null){ starts.push(c); last=c.n; }
+    else if(c.n===last+1){ starts.push(c); last=c.n; }
+    else if(c.n>last && c.n<=last+3 && blockHasOpts(c.i)){ warnings.push('Question numbering jumps from '+last+' to '+c.n+' — a question may be missing or misread.'); starts.push(c); last=c.n; }
+  }
+  var keyCount = keyInfo ? Object.keys(keyInfo.key).length : 0;
+  var declared = Math.max(starts.length, keyCount);
+  if(!starts.length){
+    return {error:{code:'NO_QUESTIONS', message:'No numbered questions were found in this PDF. Make sure questions are numbered (1., 2., … or Q1, Q2, …) and options are labelled A–D.'}};
+  }
+  if(declared>MAX_Q){
+    return {error:{code:'TOO_MANY', count:declared, message:'This PDF appears to contain '+declared+' questions. The limit is '+MAX_Q+'. Nothing was imported — split the PDF into parts of '+MAX_Q+' questions or fewer and import each separately.'}};
+  }
+  var questions=[];
+  for(i=0;i<starts.length;i++){
+    var s=starts[i], e=(i+1<starts.length)?starts[i+1].i:qLines.length;
+    var first=RE_QSTART.exec(qLines[s.i].t);
+    var blk=[{t:first[3]||'', ocr:qLines[s.i].ocr}].concat(qLines.slice(s.i+1,e)).filter(function(l){return l.t!=='';});
+    questions.push(parseBlock(s.n, blk, keyInfo));
+  }
+  if(!keyInfo && questions.every(function(q){return q.answer==null;})) warnings.push('No answer key or answers were found in this PDF. Select the correct option for every question before saving.');
+  if(keyInfo && keyCount>starts.length) warnings.push('The answer key has '+keyCount+' entries but only '+starts.length+' questions were detected.');
+  return {questions:questions, count:questions.length, keyFound:!!keyInfo, warnings:warnings};
+}
+
+function parseText(str){ return parseLines(String(str||'').split(/\r?\n/).map(function(t){return {t:t,ocr:false};})); }
+
+/* Validation used by the preview (editable state) */
+function validateQ(q){
+  var p=[], i;
+  if(!String(q.text||'').trim()) p.push('Question text is empty');
+  for(i=0;i<4;i++){ if(!String(q.options[i]||'').trim()) p.push('Option '+'ABCD'[i]+' is empty'); }
+  if(q.answer==null || q.answer<0 || q.answer>3) p.push('Select the correct answer');
+  return p;
+}
+
+/* ───────────────────────── PDF → lines (browser only) ────────────────────── */
+
+var loaded={};
+function loadScript(def){
+  if(loaded[def.src]) return loaded[def.src];
+  loaded[def.src]=new Promise(function(res,rej){
+    var s=document.createElement('script');
+    s.src=def.src; s.integrity=def.sri; s.crossOrigin='anonymous'; s.async=true;
+    s.onload=function(){res();}; s.onerror=function(){ delete loaded[def.src]; rej(new Error('LIB_LOAD')); };
+    document.head.appendChild(s);
+  });
+  return loaded[def.src];
+}
+
+function itemsToLines(items){
+  var rows=[];
+  items.forEach(function(it){
+    if(!it || typeof it.str!=='string' || !it.transform) return;
+    var x=it.transform[4], y=it.transform[5], h=Math.abs(it.height||it.transform[3]||10)||10;
+    if(it.str==='' ) return;
+    var row=null, k;
+    for(k=0;k<rows.length;k++){ if(Math.abs(rows[k].y-y)<=Math.max(2,h*0.55)){ row=rows[k]; break; } }
+    if(!row){ row={y:y, parts:[]}; rows.push(row); }
+    row.parts.push({x:x, w:it.width||0, h:h, s:it.str});
+  });
+  rows.sort(function(a,b){return b.y-a.y;});
+  return rows.map(function(r){
+    r.parts.sort(function(a,b){return a.x-b.x;});
+    var out='', prevEnd=null;
+    r.parts.forEach(function(p){
+      if(prevEnd!==null && p.x-prevEnd>p.h*0.15 && !/^\s/.test(p.s) && !/\s$/.test(out)) out+=' ';
+      out+=p.s; prevEnd=p.x+p.w;
+    });
+    return out;
+  });
+}
+
+function friendlyPdfError(e){
+  var n=(e&&e.name)||'', m=(e&&e.message)||String(e);
+  if(m==='LIB_LOAD') return 'Could not load the PDF reader library. Check your internet connection (or whether cdn.jsdelivr.net is blocked on this network) and try again.';
+  if(n==='PasswordException') return 'This PDF is password-protected. Remove the password and try again.';
+  if(n==='InvalidPDFException' || n==='FormatError') return 'This file is not a valid PDF or is damaged.';
+  if(n==='MissingPDFException') return 'The PDF could not be read.';
+  return 'The PDF could not be processed ('+m+'). You can retry, or try another file.';
+}
+
+async function extractPdf(file, progress, isCancelled){
+  var buf=await file.arrayBuffer();
+  var head=new Uint8Array(buf.slice(0,1024)), sig=String.fromCharCode.apply(null, Array.prototype.slice.call(head));
+  if(sig.indexOf('%PDF-')<0) throw {code:'BAD_TYPE', message:'This file is not a valid PDF (missing PDF header).'};
+  progress('Loading PDF reader…',0);
+  await loadScript(LIBS.pdf);
+  if(isCancelled()) return null;
+  var lib=window.pdfjsLib; lib.GlobalWorkerOptions.workerSrc=LIBS.worker;
+  var doc;
+  try{ doc=await lib.getDocument({data:new Uint8Array(buf), isEvalSupported:false, disableAutoFetch:true, disableStream:true}).promise; }
+  catch(e){ throw {code:'PDF_ERR', message:friendlyPdfError(e)}; }
+  if(doc.numPages>MAX_PAGES) throw {code:'TOO_BIG', message:'This PDF has '+doc.numPages+' pages; the limit is '+MAX_PAGES+'. A 20-question quiz should be far shorter — check you picked the right file.'};
+
+  var pages=[], ocrPages=[], p;
+  for(p=1;p<=doc.numPages;p++){
+    if(isCancelled()) return null;
+    progress('Reading page '+p+' of '+doc.numPages+'…', (p-1)/doc.numPages*(0.5));
+    var pg=await doc.getPage(p), tc=await pg.getTextContent();
+    var ls=itemsToLines(tc.items).map(cleanLine).filter(function(x){return x!=='';});
+    var chars=ls.join('').length;
+    pages.push({lines:ls, ocr:false, page:pg, chars:chars});
+    if(chars<OCR_MIN_CHARS) ocrPages.push(p-1);
+  }
+  var lowConf=false;
+  if(ocrPages.length){
+    progress('Scanned pages detected — preparing OCR (first run downloads ~10 MB)…',0.5);
+    try{ await loadScript(LIBS.tess); }catch(e){ throw {code:'OCR_LOAD', message:'This PDF looks scanned (no selectable text) and the OCR engine could not be loaded. Check your connection and retry, or upload a text-based PDF.'}; }
+    var worker;
+    try{ worker=await window.Tesseract.createWorker('eng'); }
+    catch(e){ throw {code:'OCR_LOAD', message:'The OCR engine could not start (its language data may be blocked on this network). Retry, or upload a text-based PDF.'}; }
+    try{
+      for(var k=0;k<ocrPages.length;k++){
+        if(isCancelled()) return null;
+        var idx=ocrPages[k], pgo=pages[idx].page;
+        progress('OCR on page '+(idx+1)+' ('+(k+1)+' of '+ocrPages.length+')…', 0.5+0.5*k/ocrPages.length);
+        var vp=pgo.getViewport({scale:1}), sc=Math.min(2.5, 3000/Math.max(vp.width,vp.height));
+        vp=pgo.getViewport({scale:sc});
+        var cv=document.createElement('canvas'); cv.width=Math.ceil(vp.width); cv.height=Math.ceil(vp.height);
+        await pgo.render({canvasContext:cv.getContext('2d'), viewport:vp}).promise;
+        var r=await worker.recognize(cv);
+        var txt=(r&&r.data&&r.data.text)||'';
+        if(r&&r.data&&typeof r.data.confidence==='number' && r.data.confidence<60) lowConf=true;
+        pages[idx].lines=txt.split(/\r?\n/).map(cleanLine).filter(function(x){return x!=='';});
+        pages[idx].ocr=true; cv.width=cv.height=0;
+      }
+    } finally { try{ await worker.terminate(); }catch(e){} }
+  }
+  var out=[];
+  pages.forEach(function(pp){ pp.lines.forEach(function(t){ out.push({t:t, ocr:pp.ocr, pageIdx:0}); }); });
+  /* drop page-number lines and headers/footers repeated on ≥3 pages */
+  var seen={}; pages.forEach(function(pp){ var u={}; pp.lines.forEach(function(t){ if(!u[t]){u[t]=1; seen[t]=(seen[t]||0)+1;} }); });
+  out=out.filter(function(l){
+    if(/^(?:page\s*)?\d{1,3}(?:\s*(?:of|\/)\s*\d{1,3})?$/i.test(l.t) && !/^\d{1,3}$/.test(l.t)) return false;
+    if(pages.length>=3 && seen[l.t]>=3 && l.t.length<80 && !RE_QSTART.test(l.t) && !RE_OPT_1.test(l.t)) return false;
+    return true;
+  });
+  var total=out.reduce(function(a,l){return a+l.t.length;},0);
+  if(total<20) throw {code:'EMPTY', message:ocrPages.length? 'OCR could not read any text from this scan. Try a clearer / higher-resolution PDF.' : 'No readable text was found in this PDF.'};
+  return {lines:out, ocrPageCount:ocrPages.length, lowConf:lowConf, pageCount:doc.numPages};
+}
+
+/* ───────────────────────── UI / STATE ───────────────────────────────────── */
+
+var ACE_CATS=['Current Affairs','Agriculture & Rural India','Agribusiness & Industry','Business & Economy','General Knowledge'];
+var ACE_TITLE='ACADCOM ACE \u2014 The 4 PM Challenge', ACE_N=5;
+var S={ mode:'quiz', run:0, saving:false, questions:[], fileName:'', warnings:[], ocr:0, lowConf:false, startedSaveAt:0, ace:null };
+function isAce(){ return S.mode==='ace'; }
+function istToday(){ var p=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),x={}; p.forEach(function(q){x[q.type]=q.value;}); return x.year+'-'+x.month+'-'+x.day; }
+function istIso(v){ var m=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(v||''); if(!m) throw new Error('Invalid India date/time.'); return new Date(Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5])-330*60000).toISOString(); }
+function validUrl(u){ if(!u) return true; try{ var x=new URL(u); return x.protocol==='https:'||x.protocol==='http:'; }catch(e){ return false; } }
+function gv(id){ var e=document.getElementById(id); return e?String(e.value||'').trim():''; }
+
+function root(){ return document.getElementById('qpiRoot'); }
+function setStatus(msg,pct,err){
+  var el=document.getElementById('qpiStatus'); if(!el) return;
+  el.className='qpi-status'+(err?' err':'');
+  el.innerHTML=E(msg)+(pct!=null&&!err?'<div class="qpi-bar"><i style="width:'+Math.round(pct*100)+'%"></i></div>':'');
+}
+
+function uploadHtml(){
+  var ace=isAce();
+  return '<div id="qpiRoot"><div class="mhead"><h3>'+(ace?'Import Daily Challenge (PDF)':'Import Quiz (PDF)')+'</h3><button class="close-x" onclick="closeModal()">✕</button></div>'+
+  '<div class="qpi-drop">'+(ace
+    ? 'Upload a PDF with the <b>five</b> multiple-choice questions (A–D) for the daily challenge. <b>Question order sets the category</b>: 1 Current Affairs, 2 Agriculture &amp; Rural India, 3 Agribusiness &amp; Industry, 4 Business &amp; Economy, 5 General Knowledge. If the PDF has more than five, you can delete extras (and reorder) in the preview. '
+    : 'Upload a PDF with up to <b>'+MAX_Q+'</b> multiple-choice questions (A–D). ')+
+  'Text PDFs are read directly; scanned PDFs are read with OCR. Answer keys at the end of the file are picked up automatically. You will review and edit everything before anything is saved.'+
+  '<input type="file" id="qpiFile" accept="application/pdf,.pdf" onchange="qpiOnFile(this)"></div>'+
+  '<div id="qpiStatus" class="qpi-status" style="display:none"></div>'+
+  '<div class="btn-row"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="qpiRetry" style="display:none" onclick="qpiRetry()">Try again</button></div></div>';
+}
+
+window.openQuizPdfImport=function(mode){
+  if(typeof requireAdmin==='function' && !requireAdmin()) return;
+  S.mode=(mode==='ace')?'ace':'quiz';
+  S.run++; S.questions=[]; S.warnings=[]; S.fileName=''; S.ace=null; S.saving=false;
+  openModal(uploadHtml());
+};
+window.qpiRetry=function(){ window.openQuizPdfImport(S.mode); };
+
+window.qpiOnFile=async function(inp){
+  if(typeof requireAdmin==='function' && !requireAdmin()) return;
+  var f=inp.files&&inp.files[0]; if(!f) return;
+  var st=document.getElementById('qpiStatus'), rt=document.getElementById('qpiRetry'); st.style.display='block'; rt.style.display='none';
+  var fail=function(m){ setStatus(m,null,true); rt.style.display='inline-block'; inp.value=''; };
+  if(!/\.pdf$/i.test(f.name) || (f.type && f.type!=='application/pdf')) return fail('Only PDF files are accepted.');
+  if(f.size===0) return fail('This file is empty.');
+  if(f.size>MAX_BYTES) return fail('This file is '+(f.size/1048576).toFixed(1)+' MB. The limit is '+(MAX_BYTES/1048576)+' MB.');
+  var run=++S.run, cancelled=function(){ return run!==S.run || !root(); };
+  inp.disabled=true;
+  try{
+    setStatus('Reading PDF…',0.02);
+    var ex=await extractPdf(f, function(m,p){ if(!cancelled()) setStatus(m,p); }, cancelled);
+    if(cancelled() || !ex) return;
+    var res=parseLines(ex.lines);
+    if(res.error){ inp.disabled=false; return fail(res.error.message); }
+    if(isAce() && res.count<ACE_N){ inp.disabled=false; return fail('Only '+res.count+' question(s) were found. A daily challenge needs exactly '+ACE_N+'. Check the PDF, or use a different file.'); }
+    S.questions=res.questions; S.warnings=res.warnings.slice(); S.fileName=f.name; S.ocr=ex.ocrPageCount; S.lowConf=ex.lowConf;
+    if(ex.ocrPageCount) S.warnings.push('OCR was used on '+ex.ocrPageCount+' page(s)'+(ex.lowConf?' and some text was read with low confidence':'')+'. Math, symbols and numbers especially need checking.');
+    S.warnings.push('Special formatting (superscripts, fractions, images/diagrams) is stored as plain text. Check any maths-heavy question against the PDF.');
+    renderPreview();
+  }catch(e){
+    if(cancelled()) return;
+    inp.disabled=false;
+    fail((e&&e.message)? (e.code? e.message : friendlyPdfError(e)) : 'Extraction failed. Please retry.');
+  }
+};
+
+function qHtml(q,i){
+  var ace=isAce();
+  var opts=[0,1,2,3].map(function(j){
+    return '<div class="qpi-opt"><label><input type="radio" class="qpi-correct" name="qpi_c'+i+'" value="'+j+'"'+(q.answer===j?' checked':'')+' onchange="qpiRefresh()">'+'ABCD'[j]+'</label>'+
+           '<input type="text" class="qpi-optin" value="'+E(q.options[j])+'" oninput="qpiRefresh()" placeholder="Option '+'ABCD'[j]+'"></div>';
+  }).join('');
+  var mv=ace?('<button class="icon-btn" type="button" onclick="qpiMove('+i+',-1)" aria-label="Move up">↑</button><button class="icon-btn" type="button" onclick="qpiMove('+i+',1)" aria-label="Move down">↓</button>'):'';
+  return '<div class="qpi-q" data-i="'+i+'"><div class="qpi-qh"><b class="qpi-no">Question '+(i+1)+'</b><span>'+mv+'<button class="icon-btn" type="button" onclick="qpiRemove('+i+')" aria-label="Remove question">🗑</button></span></div>'+
+    (ace?'<div class="qpi-cat" style="font-size:11.5px;color:var(--ink-soft);margin-top:2px"></div>':'')+
+    '<div class="qpi-tags"></div>'+
+    '<label>Question</label><textarea class="qpi-text" rows="3" oninput="qpiRefresh()">'+E(q.text)+'</textarea>'+
+    '<label>Options — select the correct one</label>'+opts+
+    '<label>Explanation (optional)</label><textarea class="qpi-expl" rows="2">'+E(q.explanation)+'</textarea>'+
+    (ace?'<label>Source URL (optional, http/https)</label><input type="text" class="qpi-src" inputmode="url" placeholder="https://…" value="'+E(q.source||'')+'" oninput="qpiRefresh()">':'')+
+    '</div>';
+}
+
+function renderPreview(){
+  var ace=isAce(), el=root(); if(!el) return;
+  var title=(S.fileName||'Imported Quiz').replace(/\.pdf$/i,'').replace(/[_]+/g,' ').trim().slice(0,120);
+  var td=istToday();
+  var settings=ace
+   ? '<div class="qpi-grid2"><label>Challenge date<input id="qpiDate" type="date" value="'+td+'" onchange="qpiAceDate()"></label>'+
+     '<label>Title<input id="qpiTitle" type="text" maxlength="120" value="'+E(ACE_TITLE)+'"></label>'+
+     '<label>Submission cutoff (IST)<input id="qpiCut" type="datetime-local" value="'+td+'T15:55"></label>'+
+     '<label>Results reveal (IST)<input id="qpiRev" type="datetime-local" value="'+td+'T16:00"></label></div>'+
+     '<div class="banner-tip" style="margin-top:8px">Times are treated as India time (IST), exactly like the existing Create Challenge form. Saving publishes the challenge immediately.</div>'
+   : '<label>Quiz title</label><input id="qpiTitle" type="text" maxlength="120" value="'+E(title)+'" placeholder="e.g. Microeconomics – Market Structure">'+
+     '<div class="qpi-grid"><div><label>Duration (minutes)</label><input id="qpiDur" type="number" min="1" max="180" value="10"></div>'+
+     '<div><label>Marks per question</label><input id="qpiMarks" type="number" min="1" value="1"></div></div>';
+  el.innerHTML=
+   '<div class="mhead"><h3>'+(ace?'Review daily challenge':'Review imported quiz')+'</h3><button class="close-x" onclick="closeModal()">✕</button></div>'+
+   (S.warnings.length?'<div class="banner-tip">'+S.warnings.map(function(w){return '• '+E(w);}).join('<br>')+'</div>':'')+
+   settings+
+   '<div class="qpi-sum" id="qpiSum"></div>'+
+   '<div id="qpiList">'+S.questions.map(qHtml).join('')+'</div>'+
+   '<label class="qpi-ack" id="qpiAckRow"><input type="checkbox" id="qpiAck" onchange="qpiRefresh()"><span>I have checked every flagged question against the original PDF.</span></label>'+
+   '<div class="btn-row"><button class="btn" onclick="closeModal()">Cancel</button>'+
+   '<button class="btn" id="qpiOther" onclick="qpiRetry()">Choose another PDF</button>'+
+   '<button class="btn btn-primary" id="qpiSave" onclick="qpiSave()">'+(ace?'Save and publish challenge':'Save as draft quiz')+'</button></div>';
+  qpiRefresh();
+}
+
+window.qpiAceDate=function(){ var d=gv('qpiDate'); if(!/^\d{4}-\d{2}-\d{2}$/.test(d)) return; var c=document.getElementById('qpiCut'), r=document.getElementById('qpiRev'); if(c) c.value=d+'T15:55'; if(r) r.value=d+'T16:00'; };
+
+function collect(){
+  var out=[];
+  document.querySelectorAll('#qpiList .qpi-q').forEach(function(card){
+    var i=+card.getAttribute('data-i'), src=S.questions[i]||{notes:[]};
+    var ch=card.querySelector('.qpi-correct:checked'), su=card.querySelector('.qpi-src');
+    out.push({
+      num:src.num, notes:src.notes||[], ocr:src.ocr,
+      text:card.querySelector('.qpi-text').value.trim(),
+      options:[].map.call(card.querySelectorAll('.qpi-optin'),function(x){return x.value.trim();}),
+      answer:ch?+ch.value:null,
+      explanation:card.querySelector('.qpi-expl').value.trim(),
+      source:su?su.value.trim():''
+    });
+  });
+  return out;
+}
+
+function aceProblems(q){
+  var p=[];
+  if(q.options.every(function(o){return o;}) && new Set(q.options.map(function(o){return o.toLowerCase();})).size!==4) p.push('Options must be 4 different answers');
+  if(!validUrl(q.source)) p.push('Source URL must start with http:// or https://');
+  return p;
+}
+
+window.qpiRefresh=function(){
+  if(!root()||!document.getElementById('qpiList')) return;
+  var ace=isAce(), cur=collect(), blocking=0, flagged=0;
+  document.querySelectorAll('#qpiList .qpi-q').forEach(function(card,k){
+    var q=cur[k], probs=validateQ(q).concat(ace?aceProblems(q):[]), tags='';
+    probs.forEach(function(p){ tags+='<span class="qpi-tag b">'+E(p)+'</span>'; });
+    (q.notes||[]).forEach(function(n){ tags+='<span class="qpi-tag w">'+E(n)+'</span>'; });
+    card.querySelector('.qpi-tags').innerHTML=tags;
+    card.classList.toggle('bad',probs.length>0);
+    card.querySelector('.qpi-no').textContent='Question '+(k+1);
+    var cat=card.querySelector('.qpi-cat'); if(cat) cat.textContent=k<ACE_N?('Category: '+ACE_CATS[k]):'Extra question — delete it (a challenge has exactly '+ACE_N+')';
+    if(probs.length) blocking++;
+    if((q.notes||[]).length) flagged++;
+  });
+  var n=cur.length, sum=document.getElementById('qpiSum');
+  var wrongCount = ace ? n!==ACE_N : (n<1||n>MAX_Q);
+  var msg='<b>Final question count: '+n+'</b> ('+(ace?'must be exactly '+ACE_N:'max '+MAX_Q)+')';
+  if(wrongCount) msg+=' · <span style="color:var(--absent,#c0392b)">'+(ace?(n>ACE_N?'delete '+(n-ACE_N)+' question(s)':'need '+(ACE_N-n)+' more — choose another PDF'):'')+'</span>';
+  else if(blocking) msg+=' · <span style="color:var(--absent,#c0392b)">'+blocking+' question(s) need fixing before you can save</span>';
+  else if(flagged) msg+=' · '+flagged+' flagged for review';
+  else msg+=' · all questions complete';
+  sum.innerHTML=msg;
+  var ackRow=document.getElementById('qpiAckRow'); ackRow.style.display=flagged?'flex':'none';
+  var ack=document.getElementById('qpiAck').checked;
+  var btn=document.getElementById('qpiSave');
+  btn.disabled = S.saving || wrongCount || blocking>0 || (flagged>0 && !ack);
+};
+
+window.qpiRemove=function(i){
+  if(S.ace&&S.ace.chId) return;
+  var cur=collect(); cur.splice(i,1); S.questions=cur;
+  document.getElementById('qpiList').innerHTML=S.questions.map(qHtml).join('');
+  qpiRefresh();
+};
+window.qpiMove=function(i,d){
+  if(S.ace&&S.ace.chId) return;
+  var cur=collect(), j=i+d; if(j<0||j>=cur.length) return;
+  var t=cur[i]; cur[i]=cur[j]; cur[j]=t; S.questions=cur;
+  document.getElementById('qpiList').innerHTML=S.questions.map(qHtml).join('');
+  qpiRefresh();
+};
+
+window.qpiSave=function(){ return isAce()? aceSave() : quizSave(); };
+
+async function quizSave(){
+  if(S.saving) return;
+  if(typeof requireAdmin==='function' && !requireAdmin()) return;
+  var title=gv('qpiTitle');
+  var dur=Number(document.getElementById('qpiDur').value), marks=Number(document.getElementById('qpiMarks').value);
+  var qs=collect();
+  if(!title) return toast('Enter a quiz title');
+  if(!Number.isFinite(dur)||dur<1||dur>180) return toast('Duration must be 1–180 minutes');
+  if(!Number.isFinite(marks)||marks<1) return toast('Marks per question must be at least 1');
+  if(qs.length<1) return toast('Keep at least one question');
+  if(qs.length>MAX_Q) return toast('A quiz can have at most '+MAX_Q+' questions');
+  for(var i=0;i<qs.length;i++){ var pr=validateQ(qs[i]); if(pr.length) return toast('Question '+(i+1)+': '+pr[0]); }
+  if(typeof writeLiveQuizzes!=='function'||typeof loadLiveQuizzes!=='function') return toast('Quiz module is not available.');
+
+  var dup=(typeof LIVE_QUIZZES!=='undefined'?LIVE_QUIZZES:[]).find(function(x){ return x.status!=='deleted' && String(x.title||'').trim().toLowerCase()===title.toLowerCase() && (x.questions||[]).length===qs.length; });
+  if(dup && !window.confirm('A quiz titled "'+title+'" with '+qs.length+' questions already exists. Import another copy anyway?')) return;
+
+  S.saving=true; var btn=document.getElementById('qpiSave'); btn.disabled=true; btn.textContent='Saving…';
+  var now=Date.now(); S.startedSaveAt=S.startedSaveAt||now;
+  var item={
+    title:title, durationMinutes:dur, marksPerQuestion:marks,
+    questions:qs.map(function(q){return {text:q.text, options:q.options.slice(), answer:q.answer, explanation:q.explanation};}),
+    status:'draft', updatedAt:now, createdBy:(typeof CURRENT_USER!=='undefined'&&CURRENT_USER&&CURRENT_USER.id)||'admin', createdAt:now, id:'lq_'+Math.random().toString(36).slice(2,9)
+  };
+  try{
+    /* If an earlier attempt in this session created the quiz row but failed while inserting questions, reuse it instead of creating a duplicate. */
+    if(S.orphanId){ item.id=S.orphanId; item.supabaseId=S.orphanId; }
+    await writeLiveQuizzes([item]);
+    await loadLiveQuizzes();
+    S.orphanId=null; S.startedSaveAt=0; S.questions=[]; S.saving=false;
+    closeModal(); render();
+    toast('Quiz imported as a draft. Publish it from Quiz Management.');
+  }catch(e){
+    console.error('Quiz PDF import save failed:',e);
+    try{
+      await loadLiveQuizzes();
+      var orphan=(typeof LIVE_QUIZZES!=='undefined'?LIVE_QUIZZES:[]).find(function(x){ return x.status==='draft' && String(x.title||'')===title && !(x.questions||[]).length && x.createdAt>=S.startedSaveAt-5000; });
+      S.orphanId=orphan?orphan.supabaseId||orphan.id:null;
+    }catch(e2){}
+    S.saving=false;
+    var b=document.getElementById('qpiSave'); if(b){ b.textContent='Retry save'; }
+    qpiRefresh();
+    toast('Could not save quiz: '+((e&&e.message)||e)+'. Your edits are kept — you can retry.');
+  }
+}
+
+/* ── AcadcomAce: same tables + same insert sequence as the existing "Create daily challenge" form ── */
+function lockAceForm(){
+  var r=root(); if(!r) return;
+  r.querySelectorAll('input,textarea,select').forEach(function(x){ if(x.id!=='qpiAck') x.disabled=true; });
+  r.querySelectorAll('.icon-btn').forEach(function(x){ x.disabled=true; });
+  var o=document.getElementById('qpiOther'); if(o) o.disabled=true;
+}
+
+async function aceSave(){
+  if(S.saving) return;
+  if(typeof requireAdmin==='function' && !requireAdmin()) return;
+  var st=S.ace||(S.ace={});
+  var date=gv('qpiDate'), title=gv('qpiTitle'), cut=gv('qpiCut'), rev=gv('qpiRev');
+  var qs=st.qs||collect();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('Choose the challenge date');
+  if(!title) return toast('Enter a title');
+  var cutIso, revIso;
+  try{ cutIso=istIso(cut); revIso=istIso(rev); }catch(e){ return toast('Enter a valid cutoff and reveal time'); }
+  if(cutIso>=revIso) return toast('Submission cutoff must be earlier than results reveal.');
+  if(qs.length!==ACE_N) return toast('A daily challenge needs exactly '+ACE_N+' questions.');
+  for(var i=0;i<qs.length;i++){
+    var pr=validateQ(qs[i]).concat(aceProblems(qs[i])); if(pr.length) return toast('Question '+(i+1)+': '+pr[0]);
+  }
+  var sb=window.supabaseClient; if(!sb) return toast('Supabase connection is not available.');
+  if(!st.chId && Date.parse(cutIso)<=Date.now() && !window.confirm('The submission cutoff is already in the past, so students will not be able to take this challenge. Publish anyway?')) return;
+
+  S.saving=true; var btn=document.getElementById('qpiSave'); btn.disabled=true; btn.textContent='Publishing…';
+  try{
+    if(!st.chId){
+      var u=await sb.auth.getUser(); var uid=u&&u.data&&u.data.user&&u.data.user.id;
+      if(!uid) throw new Error('Supabase login session not found.');
+      var ex=await sb.from('daily_ace_challenges').select('id,status,title').eq('challenge_date',date);
+      if(ex.error) throw ex.error;
+      if(ex.data&&ex.data.length){
+        S.saving=false; btn.disabled=false; btn.textContent='Save and publish challenge';
+        return toast('A challenge already exists for '+date+' ('+ex.data[0].status+'). Choose a different date — nothing was saved.');
+      }
+      var r=await sb.from('daily_ace_challenges').insert({challenge_date:date,title:title,submission_cutoff:cutIso,reveal_at:revIso,status:'draft',created_by:uid}).select('id').single();
+      if(r.error) throw r.error;
+      st.chId=r.data.id; st.qs=qs;           /* from here on the content is frozen so a retry resumes exactly where it stopped */
+    }
+    if(!st.ins){
+      var rows=qs.map(function(q,k){ return {challenge_id:st.chId, position:k+1, category:ACE_CATS[k], prompt:q.text, options:q.options.slice(), source_url:q.source||null}; });
+      var r2=await sb.from('daily_ace_questions').insert(rows).select('id,position');
+      if(r2.error) throw r2.error; st.ins=r2.data;
+    }
+    if(!st.keys){
+      var keys=st.ins.map(function(q){ return {question_id:q.id, correct_option:st.qs[q.position-1].answer}; });
+      var r3=await sb.from('daily_ace_answer_keys').insert(keys); if(r3.error) throw r3.error; st.keys=true;
+    }
+    if(!st.expl){
+      var ex2=st.ins.map(function(q){ return {question_id:q.id, explanation:st.qs[q.position-1].explanation||''}; });
+      var r4=await sb.from('daily_ace_explanations').insert(ex2); if(r4.error) throw r4.error; st.expl=true;
+    }
+    var r5=await sb.from('daily_ace_challenges').update({status:'published'}).eq('id',st.chId); if(r5.error) throw r5.error;
+    S.ace=null; S.questions=[]; S.saving=false;
+    closeModal();
+    toast('ACADCOM ACE challenge published.');
+    if(typeof window.aceReload==='function') window.aceReload();
+    if(typeof window.aceLoadAdminChallenges==='function') window.aceLoadAdminChallenges();
+  }catch(e){
+    console.error('ACE PDF import failed:',e);
+    S.saving=false;
+    var b=document.getElementById('qpiSave'); if(b){ b.textContent='Retry (resume)'; }
+    if(st.chId) lockAceForm();
+    qpiRefresh();
+    toast('Could not publish: '+((e&&e.message)||e)+(st.chId?' — your content is saved so far as an unpublished draft; tap Retry to finish.':'. Nothing was saved.'));
+  }
+}
+
+/* test hook (pure parser only; no DOM side-effects) */
+window.QPI_CORE={parseText:parseText, parseLines:parseLines, validateQ:validateQ, itemsToLines:itemsToLines, cleanLine:cleanLine, MAX_Q:MAX_Q};
+})();
+</script>
+<!-- ===== /QUIZ PDF IMPORT ===== -->
 
 <script>
 /* ============================================================
@@ -10209,7 +11075,7 @@ function aceNotice(msg){if(typeof toast==='function')toast(msg);else alert(msg);
 function aceBtn(label,fn,cls='btn'){return `<button type="button" class="${cls}" onclick="${fn}">${label}</button>`;}
 window.renderAceRoot=function(){
  const admin=aceIsAdmin();
- return `<div class="ace-wrap"><section class="ace-hero"><div class="ace-kicker">MANAGE · ACADCOM</div><h2>ACADCOM ACE</h2><p>The 4 PM Challenge. Five questions across current affairs, agriculture, agribusiness, business and general knowledge. Show what you know.</p><span class="ace-pill">🏆 Daily challenge · Results at 4:00 PM IST</span></section><div id="ace-main"><div class="ace-panel"><p class="ace-muted">Loading today's challenge…</p></div></div>${admin?`<div class="ace-panel"><h3>⚙️ Admin Studio</h3><p class="ace-muted">Create and publish today's five questions. The database migration must be installed before this module can save data.</p><div id="ace-admin"><button class="btn btn-primary" onclick="aceShowAdminForm()">＋ Create daily challenge</button><button class="btn" onclick="aceLoadAdminChallenges()">View challenges</button></div></div>`:''}</div>`;
+ return `<div class="ace-wrap"><section class="ace-hero"><div class="ace-kicker">MANAGE · ACADCOM</div><h2>ACADCOM ACE</h2><p>The 4 PM Challenge. Five questions across current affairs, agriculture, agribusiness, business and general knowledge. Show what you know.</p><span class="ace-pill">🏆 Daily challenge · Results at 4:00 PM IST</span></section><div id="ace-main"><div class="ace-panel"><p class="ace-muted">Loading today's challenge…</p></div></div>${admin?`<div class="ace-panel"><h3>⚙️ Admin Studio</h3><p class="ace-muted">Create and publish today's five questions. The database migration must be installed before this module can save data.</p><div id="ace-admin"><button class="btn btn-primary" onclick="aceShowAdminForm()">＋ Create daily challenge</button><button class="btn" onclick="openQuizPdfImport('ace')">📄 Import from PDF</button><button class="btn" onclick="aceLoadAdminChallenges()">View challenges</button></div></div>`:''}</div>`;
 };
 async function aceLoad(){
  const root=document.getElementById('ace-main');if(!root)return;
@@ -10246,7 +11112,7 @@ window.aceShowAdminForm=function(){const el=document.getElementById('ace-admin')
 function aceLocalDateTime(d){const pad=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;}
 function aceISTIso(value){const m=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);if(!m)throw new Error('Invalid India date/time.');return new Date(Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5])-330*60000).toISOString();}
 window.aceCreateChallenge=async function(e){e.preventDefault();if(!aceIsAdmin())return aceNotice('Admin access required.');const sb=aceSb();const date=document.getElementById('ace-date').value,cut=document.getElementById('ace-cutoff').value,rev=document.getElementById('ace-reveal').value,title=document.getElementById('ace-title').value.trim();const qs=ACE_CATEGORIES.map((category,i)=>({position:i+1,category,prompt:document.getElementById(`ace-prompt-${i}`).value.trim(),options:[0,1,2,3].map(j=>document.getElementById(`ace-opt-${i}-${j}`).value.trim()),correct_option:Number(document.getElementById(`ace-correct-${i}`).value),source_url:document.getElementById(`ace-source-${i}`).value.trim()||null,explanation:document.getElementById(`ace-explain-${i}`).value.trim()}));if(qs.some(q=>!q.prompt||q.options.some(o=>!o)||new Set(q.options).size!==4)){aceNotice('Complete all five questions and four distinct options per question.');return;}if(aceISTIso(cut)>=aceISTIso(rev)){aceNotice('Submission cutoff must be earlier than results reveal.');return;}const btn=e.submitter;if(btn){btn.disabled=true;btn.textContent='Publishing…';}try{const {data:ch,error}=await sb.from('daily_ace_challenges').insert({challenge_date:date,title,submission_cutoff:aceISTIso(cut),reveal_at:aceISTIso(rev),status:'draft',created_by:(await sb.auth.getUser()).data.user.id}).select('id').single();if(error)throw error;const qRows=qs.map(q=>({challenge_id:ch.id,position:q.position,category:q.category,prompt:q.prompt,options:q.options,source_url:q.source_url}));const {data:inserted,error:qe}=await sb.from('daily_ace_questions').insert(qRows).select('id,position');if(qe)throw qe;const keys=inserted.map(q=>({question_id:q.id,correct_option:qs.find(x=>x.position===q.position).correct_option}));const {error:ke}=await sb.from('daily_ace_answer_keys').insert(keys);if(ke)throw ke;const exRows=inserted.map(q=>({question_id:q.id,explanation:qs.find(x=>x.position===q.position).explanation}));const {error:xe}=await sb.from('daily_ace_explanations').insert(exRows);if(xe)throw xe;const {error:pe}=await sb.from('daily_ace_challenges').update({status:'published'}).eq('id',ch.id);if(pe)throw pe;aceNotice('ACADCOM ACE challenge published.');aceReload();aceLoadAdminChallenges();}catch(err){console.error(err);aceNotice('Could not publish: '+(err.message||'Check the required Supabase migration and permissions.'));}finally{if(btn){btn.disabled=false;btn.textContent='Save and publish challenge';}}};
-window.aceLoadAdminChallenges=async function(){const el=document.getElementById('ace-admin');if(!el||!aceIsAdmin())return;el.innerHTML='<p class="ace-muted">Loading challenges…</p>';try{const {data,error}=await aceSb().from('daily_ace_challenges').select('id,challenge_date,title,status,submission_cutoff,reveal_at').order('challenge_date',{ascending:false}).limit(14);if(error)throw error;el.innerHTML=`<div class="ace-actions"><button class="btn btn-primary" onclick="aceShowAdminForm()">＋ Create daily challenge</button></div>${(data||[]).map(c=>`<div class="ace-rank-row"><div class="ace-rank-num">🏆</div><div><div class="ace-rank-name">${aceEsc(c.title)}</div><div class="ace-rank-meta">${aceEsc(c.challenge_date)} · ${aceEsc(c.status)}</div></div><span>${aceEsc(aceTime(c.reveal_at))}</span></div>`).join('')||'<p class="ace-muted">No challenges created yet.</p>'}`;}catch(e){el.innerHTML=`<p class="ace-muted">Could not load challenges: ${aceEsc(e.message||'Database setup required.')}</p><button class="btn" onclick="aceShowAdminForm()">Create challenge</button>`;}};
+window.aceLoadAdminChallenges=async function(){const el=document.getElementById('ace-admin');if(!el||!aceIsAdmin())return;el.innerHTML='<p class="ace-muted">Loading challenges…</p>';try{const {data,error}=await aceSb().from('daily_ace_challenges').select('id,challenge_date,title,status,submission_cutoff,reveal_at').order('challenge_date',{ascending:false}).limit(14);if(error)throw error;el.innerHTML=`<div class="ace-actions"><button class="btn btn-primary" onclick="aceShowAdminForm()">＋ Create daily challenge</button><button class="btn" onclick="openQuizPdfImport('ace')">📄 Import from PDF</button></div>${(data||[]).map(c=>`<div class="ace-rank-row"><div class="ace-rank-num">🏆</div><div><div class="ace-rank-name">${aceEsc(c.title)}</div><div class="ace-rank-meta">${aceEsc(c.challenge_date)} · ${aceEsc(c.status)}</div></div><span>${aceEsc(aceTime(c.reveal_at))}</span></div>`).join('')||'<p class="ace-muted">No challenges created yet.</p>'}`;}catch(e){el.innerHTML=`<p class="ace-muted">Could not load challenges: ${aceEsc(e.message||'Database setup required.')}</p><button class="btn" onclick="aceShowAdminForm()">Create challenge</button>`;}};
 // The router calls renderAceRoot synchronously; load data after the page is mounted.
 const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){const markup=originalRenderAce();setTimeout(aceLoad,0);return markup;};
 })();
@@ -12167,6 +13033,935 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
   };
   window.uxConfRefresh=refresh;
   SQL="-- =====================================================================\n-- MANAGE \u00b7 Academic Committee \u2014 CONFESSION ROOM (anonymous student messages)\n-- Run ONCE in Supabase -> SQL Editor.  Safe to run again.  Changes no existing data.\n--\n-- How anonymity works\n--   * What students can read:  confession_posts   (message text only \u2014 NO name, NO id of the writer)\n--   * Who wrote it:            confession_authors (name + roll) \u2014 readable by the ADMIN ONLY\n--   * Students cannot write to either table directly. They post through post_confession(),\n--     which records the writer in the admin-only table on the server.\n-- =====================================================================\n\n-- Administrator check (same rule as the rest of the portal: profiles.role = 'admin')\ncreate or replace function public.is_committee_admin()\nreturns boolean language sql security definer set search_path = public stable as\n$$ select exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin') $$;\nrevoke all on function public.is_committee_admin() from public;\ngrant execute on function public.is_committee_admin() to authenticated;\n\n-- 1) The public wall: message text only\ncreate table if not exists public.confession_posts (\n  id         uuid primary key default gen_random_uuid(),\n  body       text not null check (char_length(btrim(body)) between 2 and 600),\n  tone       smallint not null default (floor(random() * 6))::smallint,   -- avatar colour 0-5\n  is_hidden  boolean not null default false,                               -- admin can hide a post\n  created_at timestamptz not null default now()\n);\n\n-- 2) Who wrote each post: visible to the administrator only\ncreate table if not exists public.confession_authors (\n  post_id     uuid primary key references public.confession_posts(id) on delete cascade,\n  author_id   uuid not null,\n  author_name text,\n  author_roll text,\n  created_at  timestamptz not null default now()\n);\ncreate index if not exists confession_authors_author_idx on public.confession_authors (author_id, created_at desc);\n\nalter table public.confession_posts   enable row level security;\nalter table public.confession_authors enable row level security;\n\ndo $$\ndeclare r record;\nbegin\n  for r in select schemaname, tablename, policyname from pg_policies\n           where schemaname = 'public' and tablename in ('confession_posts','confession_authors')\n  loop execute format('drop policy %I on %I.%I', r.policyname, r.schemaname, r.tablename); end loop;\nend $$;\n\n-- Posts: everyone signed in reads visible posts; only the administrator sees hidden ones, hides, or deletes.\n-- (There is deliberately NO insert policy: nobody can post straight into the table.)\ncreate policy posts_read   on public.confession_posts for select to authenticated\n  using ( not is_hidden or public.is_committee_admin() );\ncreate policy posts_hide   on public.confession_posts for update to authenticated\n  using ( public.is_committee_admin() ) with check ( public.is_committee_admin() );\ncreate policy posts_delete on public.confession_posts for delete to authenticated\n  using ( public.is_committee_admin() );\n\n-- Authors: administrator only. Students get zero rows.\ncreate policy authors_admin_read on public.confession_authors for select to authenticated\n  using ( public.is_committee_admin() );\n\nrevoke all on public.confession_posts   from anon, authenticated;\nrevoke all on public.confession_authors from anon, authenticated;\ngrant select on public.confession_posts   to authenticated;\ngrant update (is_hidden) on public.confession_posts to authenticated;   -- row policy still limits this to the admin\ngrant delete on public.confession_posts   to authenticated;             -- row policy still limits this to the admin\ngrant select on public.confession_authors to authenticated;             -- row policy returns rows to the admin only\n\n-- 3) Posting: server records the writer; limited to 5 posts per 10 minutes per person\ncreate or replace function public.post_confession(p_body text)\nreturns uuid language plpgsql security definer set search_path = public as\n$$\ndeclare\n  v_uid  uuid := auth.uid();\n  v_body text := btrim(coalesce(p_body, ''));\n  v_name text; v_roll text; v_id uuid;\nbegin\n  if v_uid is null then raise exception 'not_signed_in'; end if;\n  if char_length(v_body) < 2 or char_length(v_body) > 600 then raise exception 'bad_length'; end if;\n  if (select count(*) from public.confession_authors a\n        where a.author_id = v_uid and a.created_at > now() - interval '10 minutes') >= 5 then\n    raise exception 'rate_limited';\n  end if;\n\n  select s.name, s.id::text into v_name, v_roll\n    from public.students s where s.auth_user_id::text = v_uid::text limit 1;\n  if v_name is null then\n    select p.full_name into v_name from public.profiles p where p.id::text = v_uid::text;\n  end if;\n\n  insert into public.confession_posts (body) values (v_body) returning id into v_id;\n  insert into public.confession_authors (post_id, author_id, author_name, author_roll)\n    values (v_id, v_uid, coalesce(v_name, 'Unknown'), v_roll);\n  return v_id;\nend;\n$$;\n\n-- 4) A student can see WHICH posts are theirs (to show \"You\" and allow deleting), never anyone else's\ncreate or replace function public.my_confession_ids()\nreturns setof uuid language sql security definer set search_path = public stable as\n$$ select post_id from public.confession_authors where author_id = auth.uid() $$;\n\ncreate or replace function public.delete_my_confession(p_id uuid)\nreturns boolean language plpgsql security definer set search_path = public as\n$$\nbegin\n  delete from public.confession_posts p\n   where p.id = p_id and exists (select 1 from public.confession_authors a where a.post_id = p.id and a.author_id = auth.uid());\n  return found;\nend;\n$$;\n\nrevoke all on function public.post_confession(text)        from public, anon;\nrevoke all on function public.my_confession_ids()          from public, anon;\nrevoke all on function public.delete_my_confession(uuid)   from public, anon;\ngrant execute on function public.post_confession(text)      to authenticated;\ngrant execute on function public.my_confession_ids()        to authenticated;\ngrant execute on function public.delete_my_confession(uuid) to authenticated;\n\n-- 5) Live updates: instant for the confession room AND for everything the admin changes\ndo $$\ndeclare t text;\nbegin\n  foreach t in array array['confession_posts','timetable','attendance','subjects','resources','exams',\n                           'announcements','helpdesk_tickets','quizzes','polls','poll_votes']\n  loop\n    begin execute format('alter publication supabase_realtime add table public.%I', t);\n    exception when others then null;       -- already added, or table not present: ignore\n    end;\n  end loop;\nend $$;\n";
+})();
+
+</script>
+
+<script>
+/* =========================================================
+   ACADCOM — HISTORICAL ATTENDANCE IMPORT / MANUAL CORRECTION / RECORD EDITING
+   Additive module. Reuses the existing `attendance` table, HISTORY rebuild
+   (syncSupabaseAttendance) and percentage logic. Writes ONLY through the
+   admin-checked Supabase functions created by the migration.
+   ========================================================= */
+(function (root) {
+  'use strict';
+  const ACX = {};
+  ACX.SHEETJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+  ACX.MAX_ROWS_PER_FILE = 20000;
+
+  /* ---------- small helpers ---------- */
+  const str = v => (v == null ? '' : String(v)).trim();
+  const normKey = s => str(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+  ACX.normKey = normKey;
+  const pad2 = n => String(n).padStart(2, '0');
+  const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
+    january: 1, february: 2, march: 3, april: 4, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12 };
+
+  function validYMD(y, m, d) {
+    if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+    return `${y}-${pad2(m)}-${pad2(d)}`;
+  }
+
+  /* Accepts ISO, dd/mm/yyyy (Indian order), "6 Jul 2026", Excel serial numbers, Date objects. */
+  ACX.parseDate = function (v) {
+    if (v == null || v === '') return null;
+    if (v instanceof Date && !isNaN(v)) return validYMD(v.getUTCFullYear(), v.getUTCMonth() + 1, v.getUTCDate());
+    if (typeof v === 'number') {
+      if (v > 20000 && v < 80000) { const d = new Date(Math.round((v - 25569) * 86400000)); return validYMD(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()); }
+      return null;
+    }
+    const s = str(v);
+    let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:$|[T\s])/);
+    if (m) return validYMD(+m[1], +m[2], +m[3]);
+    m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/);
+    if (m) return validYMD(m[3].length === 2 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
+    m = s.match(/^(\d{1,2})[\s\-/.]*([A-Za-z]{3,9})[\s\-/.,]*(\d{2}|\d{4})$/);
+    if (m && MONTHS[m[2].toLowerCase()]) return validYMD(m[3].length === 2 ? 2000 + +m[3] : +m[3], MONTHS[m[2].toLowerCase()], +m[1]);
+    m = s.match(/^([A-Za-z]{3,9})[\s\-/.]*(\d{1,2})[\s,\-/.]+(\d{4})$/);
+    if (m && MONTHS[m[1].toLowerCase()]) return validYMD(+m[3], MONTHS[m[1].toLowerCase()], +m[2]);
+    if (/^\d{5}(\.\d+)?$/.test(s)) return ACX.parseDate(parseFloat(s));
+    return null;
+  };
+
+  ACX.normStatus = function (v) {
+    const s = str(v).toLowerCase();
+    if (['p', 'present', 'pr', 'prs'].includes(s)) return 'present';
+    if (['a', 'absent', 'ab', 'abs'].includes(s)) return 'absent';
+    return null;
+  };
+
+  /* Session labels follow the existing app: "3" or a range "3-4" (max 5 sessions wide). */
+  ACX.sessionNums = function (label) {
+    const t = str(label);
+    let m = t.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (m) { const x = +m[1], y = +m[2]; if (y > x && y - x <= 5) { const r = []; for (let i = x; i <= y; i++) r.push(i); return r; } return []; }
+    return /^\d+$/.test(t) ? [+t] : [];
+  };
+  ACX.parseSession = function (v) {
+    if (v == null || v === '') return null;
+    let s = str(v).replace(/[–—]/g, '-').replace(/\bto\b/ig, '-');
+    s = s.replace(/^(?:session|sess|s)[\s\-_.:#]*/i, '').replace(/\s+/g, '');
+    if (/^\d+$/.test(s)) s = String(+s);
+    else { const m = s.match(/^(\d+)-(\d+)$/); if (m) s = `${+m[1]}-${+m[2]}`; }
+    const nums = ACX.sessionNums(s);
+    return nums.length ? { label: s, nums } : null;
+  };
+  const overlap = (a, b) => a.some(x => b.includes(x));
+
+  /* ---------- sheet parsing (array-of-arrays -> normalised rows) ---------- */
+  const H = {
+    id: ['studentid', 'rollno', 'roll', 'rollnumber', 'id', 'studentroll', 'regno', 'registrationno', 'enrollmentno', 'enrolmentno', 'sno'],
+    name: ['studentname', 'name'],
+    subject: ['subject', 'subjectname', 'subjectcode', 'course'],
+    date: ['date', 'attendancedate', 'classdate'],
+    session: ['session', 'sessionno', 'sessionnumber', 'sessionlabel'],
+    status: ['status', 'attendance', 'presentabsent', 'pa', 'attendancestatus'],
+    section: ['section', 'sec']
+  };
+  function headerIndex(row) {
+    const idx = {}; row.forEach((c, i) => { const k = normKey(c); if (!k) return; for (const f in H) if (idx[f] == null && H[f].includes(k)) idx[f] = i; });
+    return idx;
+  }
+  function parseMatrixHeader(cell) {
+    if (cell == null || cell === '') return null;
+    if (cell instanceof Date || typeof cell === 'number') { const d = ACX.parseDate(cell); return d ? { date: d, label: null } : null; }
+    let s = str(cell), label = null;
+    const m = s.match(/(?:^|[\s|(,_/])(?:s|sess|session)[\s\-_.:#]*(\d+(?:\s*(?:-|–|to)\s*\d+)?)\)?\s*$/i);
+    if (m) { const p = ACX.parseSession(m[1]); if (p) label = p.label; s = s.slice(0, m.index).replace(/[\s|(,_/-]+$/, ''); }
+    const d = ACX.parseDate(s);
+    return d ? { date: d, label } : null;
+  }
+
+  /* aoa = rows of cells. Returns {format, rows, blanks, warnings} or {error} */
+  ACX.parseRows = function (aoa) {
+    const warnings = [];
+    let hi = -1, idx = null;
+    for (let i = 0; i < Math.min(aoa.length, 15); i++) {
+      const ix = headerIndex(aoa[i] || []);
+      if (ix.id != null && ((ix.date != null && ix.status != null) || (aoa[i] || []).filter(c => parseMatrixHeader(c)).length >= 1)) { hi = i; idx = ix; break; }
+    }
+    if (hi < 0) return { error: 'Could not find a header row with a Student ID column plus Date/Status columns (or date columns). Use the template.' };
+    const header = aoa[hi], rows = []; let blanks = 0;
+    if (idx.date != null && idx.status != null) {
+      for (let r = hi + 1; r < aoa.length; r++) {
+        const line = aoa[r] || []; if (line.every(c => str(c) === '')) continue;
+        const get = f => (idx[f] == null ? '' : line[idx[f]]);
+        if (str(get('status')) === '' && str(get('id')) === '') continue;
+        if (str(get('status')) === '') { blanks++; continue; }
+        const issues = [];
+        const date = ACX.parseDate(get('date')); if (!date) issues.push('invalid_date');
+        const status = ACX.normStatus(get('status')); if (!status) issues.push('invalid_status');
+        let label = null;
+        if (str(get('session')) !== '') { const p = ACX.parseSession(get('session')); if (p) label = p.label; else issues.push('invalid_session'); }
+        rows.push({ rowNo: r + 1, studentId: str(get('id')), studentName: str(get('name')), subjectText: str(get('subject')), date, label,
+          status, statusRaw: str(get('status')), section: str(get('section')), issues });
+      }
+      return { format: 'long', rows, blanks, warnings };
+    }
+    const cols = []; header.forEach((c, i) => { if (i === idx.id || i === idx.name) return; const p = parseMatrixHeader(c); if (p) cols.push({ i, ...p }); });
+    if (!cols.length) return { error: 'No date columns recognised in the header row.' };
+    for (let r = hi + 1; r < aoa.length; r++) {
+      const line = aoa[r] || []; if (str(line[idx.id]) === '') continue;
+      cols.forEach(c => {
+        const raw = line[c.i]; if (str(raw) === '') { blanks++; return; }
+        const status = ACX.normStatus(raw);
+        rows.push({ rowNo: r + 1, studentId: str(line[idx.id]), studentName: idx.name != null ? str(line[idx.name]) : '', subjectText: '', date: c.date,
+          label: c.label, status, statusRaw: str(raw), section: '', issues: status ? [] : ['invalid_status'] });
+      });
+    }
+    return { format: 'matrix', rows, blanks, warnings };
+  };
+
+  /* ---------- student / subject resolution ---------- */
+  function buildStudentIndex(students, idMap) {
+    const byExact = new Map(), byKey = new Map(), byNum = new Map(), byName = new Map();
+    students.forEach(s => {
+      byExact.set(str(s.id).toLowerCase(), s); byKey.set(normKey(s.id), s);
+      if (/^\d+$/.test(str(s.id))) byNum.set(String(+s.id), s);
+      const nk = normKey(s.name); byName.set(nk, byName.has(nk) ? null : s);
+    });
+    return function resolve(fileId, fileName) {
+      const mapped = idMap && idMap[normKey(fileId)];
+      if (mapped) { const s = byExact.get(str(mapped).toLowerCase()); if (s) return s; }
+      let s = byExact.get(str(fileId).toLowerCase()) || byKey.get(normKey(fileId));
+      if (!s && /^\d+$/.test(str(fileId))) s = byNum.get(String(+fileId));
+      if (!s && !str(fileId) && fileName) s = byName.get(normKey(fileName)) || null;
+      return s || null;
+    };
+  }
+  ACX.matchSubject = function (text, subjects) {
+    const k = normKey(text); if (!k) return null;
+    return subjects.find(s => normKey(s.name) === k || (s.code && normKey(s.code) === k)) || null;
+  };
+
+  /* ---------- existing-attendance index (built from HISTORY, same data the dashboard uses) ---------- */
+  function indexHistory(history) {
+    const map = new Map();
+    (history || []).forEach(r => {
+      const key = `${str(r.subjectId)}|${str(r.dateISO)}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push({ label: str(r.sessionLabel), sessionId: str(r.sessionId), section: str(r.section) || 'A&B',
+        present: new Set((r.presentList || []).map(String)), absent: new Set((r.absentList || []).map(String)) });
+    });
+    return map;
+  }
+  function findSlot(hidx, subjectId, date, label) {
+    const recs = hidx.get(`${str(subjectId)}|${date}`) || [];
+    const nums = ACX.sessionNums(label);
+    const exact = recs.find(r => r.label === label) || null;
+    const clash = recs.some(r => r.label !== label && overlap(ACX.sessionNums(r.label), nums));
+    return { exact, clash };
+  }
+  const newSessionId = (subjectId, date, section, label) => `hist|${subjectId}|${date}|${section}|S${label}`;
+
+  /* ---------- IMPORT PLAN (the preview) ----------
+     file = {name, rows, mapping:{subjectId, from, to, section, sessionByDate, split, addMissingAbsent, idMap}}
+     ctx  = {students, subjects, history} */
+  ACX.planImport = function (file, ctx) {
+    const mp = file.mapping || {}, subjects = ctx.subjects || [];
+    const subject = subjects.find(s => str(s.id) === str(mp.subjectId)) || null;
+    const resolve = buildStudentIndex(ctx.students || [], mp.idMap);
+    const hidx = indexHistory(ctx.history);
+    const sessSection = mp.section || 'A&B';
+    const out = { subject, rows: [], payload: [], groups: [], summary: { total: 0, insert: 0, duplicate: 0, conflict: 0, unmatched: 0, noAccount: 0, invalid: 0, missingSession: 0, blank: file.blanks || 0, impliedAbsent: 0 }, unmatchedIds: {} };
+    const S = out.summary; const seenStudentDate = new Map(); const seenKey = new Map(); const groupMap = new Map();
+
+    const getGroup = (date, label) => {
+      const key = `${date}|${label}`;
+      if (!groupMap.has(key)) {
+        const slot = findSlot(hidx, mp.subjectId, date, label);
+        const g = { key, date, label, combined: ACX.sessionNums(label).length > 1, existing: !!slot.exact, clash: slot.clash,
+          sessionId: slot.exact ? slot.exact.sessionId : (subject ? newSessionId(subject.id, date, sessSection, label) : ''),
+          section: slot.exact ? slot.exact.section : sessSection, slot: slot.exact, counts: { insert: 0, duplicate: 0, conflict: 0, invalid: 0 }, members: new Set(), missing: [] };
+        groupMap.set(key, g); out.groups.push(g);
+      }
+      return groupMap.get(key);
+    };
+
+    (file.rows || []).forEach(src => {
+      S.total++;
+      const row = { rowNo: src.rowNo, fileId: src.studentId, date: src.date, label: src.label, status: src.status, kind: 'insert', reason: '', roll: '', name: '' };
+      out.rows.push(row);
+      const bad = (kind, reason) => { row.kind = kind; row.reason = reason; };
+
+      const st = resolve(src.studentId, src.studentName);
+      if (!st) { bad('unmatched_student', `Student ID "${src.studentId || '(blank)'}" not found in the roster`); S.unmatched++; out.unmatchedIds[normKey(src.studentId)] = out.unmatchedIds[normKey(src.studentId)] || { id: src.studentId, name: src.studentName, count: 0 }; out.unmatchedIds[normKey(src.studentId)].count++; return; }
+      row.roll = st.id; row.name = st.name;
+      if (!subject) { bad('unknown_subject', 'No subject selected for this file'); S.invalid++; return; }
+      if (src.subjectText) { const sm = ACX.matchSubject(src.subjectText, subjects); if (!sm || str(sm.id) !== str(subject.id)) { bad('subject_mismatch', `Row subject "${src.subjectText}" differs from the mapped subject "${subject.name}"`); S.invalid++; return; } }
+      if (src.issues && src.issues.length) { bad(src.issues[0], src.issues.map(x => x.replace('_', ' ')).join(', ')); S.invalid++; return; }
+      if ((mp.from && src.date < mp.from) || (mp.to && src.date > mp.to)) { bad('out_of_range', `Date ${src.date} is outside the selected range`); S.invalid++; return; }
+      if (!st.auth_user_id) { bad('no_account', 'Student has no linked login account, so attendance cannot be stored'); S.noAccount++; return; }
+
+      let label = src.label;
+      if (!label) label = (mp.sessionByDate && mp.sessionByDate[src.date]) || null;
+      if (!label) { bad('missing_session', 'No session number for this date — assign one in the preview'); S.missingSession++; row.needsSession = true; return; }
+      row.label = label;
+      const g = getGroup(src.date, label);
+      if (g.section !== 'A&B' && st.section !== g.section) { bad('section_mismatch', `Student is in section ${st.section}; session is for section ${g.section}`); S.invalid++; g.counts.invalid++; return; }
+      g.members.add(str(st.id));
+
+      /* duplicates / conflicts inside the same file */
+      const k = `${st.id}|${src.date}|${label}`;
+      if (seenKey.has(k)) {
+        const first = seenKey.get(k);
+        if (first.status === src.status) { bad('duplicate', 'Repeated in this file'); S.duplicate++; g.counts.duplicate++; }
+        else {
+          const msg = 'Same student/date/session appears with different statuses in this file';
+          bad('in_file_conflict', msg); S.conflict++; g.counts.conflict++;
+          if (first.row.kind === 'insert') { first.row.kind = 'in_file_conflict'; first.row.reason = msg; if (first.counted) { S.insert--; g.counts.insert--; S.conflict++; g.counts.conflict++; } }
+        }
+        return;
+      }
+      const sd = `${st.id}|${src.date}`; const prior = seenStudentDate.get(sd) || [];
+      if (prior.some(p => p !== label && overlap(ACX.sessionNums(p), ACX.sessionNums(label)))) { bad('overlap_conflict', 'Overlaps another session for this student on this date'); S.conflict++; g.counts.conflict++; return; }
+      prior.push(label); seenStudentDate.set(sd, prior);
+      seenKey.set(k, { status: src.status, row });
+
+      /* conflicts with attendance already stored */
+      if (g.clash) { bad('overlap_conflict', 'Overlaps an existing session on this date (e.g. a combined session already recorded)'); S.conflict++; g.counts.conflict++; return; }
+      if (g.slot) {
+        const prev = g.slot.present.has(str(st.id)) ? 'present' : g.slot.absent.has(str(st.id)) ? 'absent' : null;
+        if (prev) {
+          if (prev === src.status) { bad('duplicate', 'Already recorded with the same status'); S.duplicate++; g.counts.duplicate++; }
+          else { bad('status_conflict', `Already recorded as ${prev}; file says ${src.status}. Use Manual Correction to change it`); S.conflict++; g.counts.conflict++; }
+          return;
+        }
+      }
+      row.group = g; g.counts.insert++; S.insert++; seenKey.get(k).counted = true;
+    });
+
+    /* roster students missing from a session (they would silently count as Absent in the existing percentage logic) */
+    const roster = sec => (ctx.students || []).filter(s => s.active !== false && (sec === 'A&B' || s.section === sec));
+    out.groups.forEach(g => {
+      if (!g.counts.insert && !g.counts.duplicate) return;
+      const have = new Set(g.members);
+      if (g.slot) { g.slot.present.forEach(x => have.add(x)); g.slot.absent.forEach(x => have.add(x)); }
+      g.missing = roster(g.section).filter(s => !have.has(str(s.id)));
+    });
+
+    /* build the payload (respecting split-confirmations) */
+    const mk = (row, g, label, status, sessionId, st) => ({ student_id: st.auth_user_id, subject_id: subject.id, attendance_date: g.date, status,
+      session_id: sessionId, section: g.section, subject_name: subject.name, faculty_name: subject.faculty || subject.faculty_name || null,
+      venue: subject.venue || null, session_label: label, time_text: null });
+    const stByRoll = new Map((ctx.students || []).map(s => [str(s.id), s]));
+    out.rows.forEach(row => {
+      if (row.kind !== 'insert' || !row.group) return;
+      const g = row.group, st = stByRoll.get(str(row.roll));
+      if (g.combined && mp.split && mp.split[g.key] && !g.existing) {
+        ACX.sessionNums(g.label).forEach(n => out.payload.push(mk(row, g, String(n), row.status, newSessionId(subject.id, g.date, g.section, String(n)), st)));
+      } else out.payload.push(mk(row, g, g.label, row.status, g.sessionId, st));
+    });
+    if (mp.addMissingAbsent) {
+      out.groups.forEach(g => {
+        if (!g.counts.insert) return;
+        g.missing.forEach(m => {
+          if (!m.auth_user_id) return;
+          const labels = (g.combined && mp.split && mp.split[g.key] && !g.existing) ? ACX.sessionNums(g.label).map(String) : [g.label];
+          labels.forEach(l => out.payload.push(mk(null, g, l, 'absent', labels.length > 1 || g.label !== l ? newSessionId(subject.id, g.date, g.section, l) : g.sessionId, m)));
+          S.impliedAbsent++;
+        });
+      });
+    }
+    out.groups.sort((a, b) => a.date.localeCompare(b.date) || a.label.localeCompare(b.label, undefined, { numeric: true }));
+    return out;
+  };
+
+  /* ---------- MANUAL ENTRY PLAN ----------
+     req = {subjectId, date, label, section, rolls[], status, others: 'absent'|'present'|null} */
+  ACX.planManual = function (req, ctx) {
+    const subject = (ctx.subjects || []).find(s => str(s.id) === str(req.subjectId)) || null;
+    const res = { errors: [], rows: [], payload: [], sessionExists: false, needsOthers: false, others: [], subject };
+    if (!subject) res.errors.push('Choose a subject.');
+    const date = ACX.parseDate(req.date); if (!date) res.errors.push('Choose a valid date.');
+    const sess = ACX.parseSession(req.label); if (!sess) res.errors.push('Enter a valid session number (e.g. 3, or 3-4 for a combined entry).');
+    if (!['present', 'absent'].includes(req.status)) res.errors.push('Choose Present or Absent.');
+    if (!(req.rolls || []).length) res.errors.push('Select at least one student.');
+    if (res.errors.length) return res;
+    const hidx = indexHistory(ctx.history), slot = findSlot(hidx, subject.id, date, sess.label);
+    res.sessionExists = !!slot.exact;
+    const section = slot.exact ? slot.exact.section : (req.section || 'A&B');
+    const sessionId = slot.exact ? slot.exact.sessionId : newSessionId(subject.id, date, section, sess.label);
+    const byRoll = new Map((ctx.students || []).map(s => [str(s.id), s]));
+    const base = st => ({ student_id: st.auth_user_id, subject_id: subject.id, attendance_date: date, session_id: sessionId, section,
+      subject_name: subject.name, faculty_name: subject.faculty || subject.faculty_name || null, venue: subject.venue || null, session_label: sess.label, time_text: null });
+    const chosen = new Set();
+    req.rolls.forEach(roll => {
+      const st = byRoll.get(str(roll)); const row = { roll, name: st ? st.name : '?', before: null, after: req.status, effect: '', note: '' };
+      res.rows.push(row);
+      if (!st) { row.effect = 'blocked'; row.note = 'Not in roster'; return; }
+      chosen.add(str(st.id));
+      if (!st.auth_user_id) { row.effect = 'blocked'; row.note = 'No linked login account'; return; }
+      if (section !== 'A&B' && st.section !== section) { row.effect = 'blocked'; row.note = `Student is in section ${st.section}`; return; }
+      if (slot.clash) { row.effect = 'blocked'; row.note = 'Overlaps another session already recorded on this date'; return; }
+      if (slot.exact) row.before = slot.exact.present.has(str(st.id)) ? 'present' : slot.exact.absent.has(str(st.id)) ? 'absent' : null;
+      if (row.before === req.status) { row.effect = 'nochange'; return; }
+      row.effect = row.before ? 'change' : 'add';
+      res.payload.push({ ...base(st), new_status: req.status });
+    });
+    /* A brand-new session counts for EVERY roster student (unlisted = Absent in the existing logic) -> admin must decide */
+    if (!slot.exact && !slot.clash && res.payload.length) {
+      res.needsOthers = true;
+      res.others = (ctx.students || []).filter(s => s.active !== false && (section === 'A&B' || s.section === section) && !chosen.has(str(s.id)));
+      if (req.others === 'absent' || req.others === 'present') {
+        res.others.forEach(s => { if (s.auth_user_id) res.payload.push({ ...base(s), new_status: req.others }); });
+      }
+    }
+    return res;
+  };
+
+  /* ---------- misc ---------- */
+  ACX.sha256 = async function (text) {
+    if (root.crypto && root.crypto.subtle) {
+      const buf = await root.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    /* Fallback for non-secure contexts (no crypto.subtle): two independent 32-bit hashes + length */
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return 'x' + (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0') + text.length.toString(16);
+  };
+  ACX.batchKey = async function (payload, subjectId) {
+    const canon = payload.map(p => [p.student_id, p.attendance_date, p.session_label, p.status].join('|')).sort().join('\n');
+    return ACX.sha256(`${subjectId}\n${canon}`);
+  };
+
+  root.ACX = ACX;
+  if (typeof module !== 'undefined' && module.exports) module.exports = ACX;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+/* ---------------- ACADCOM attendance tools — UI layer (admin only) ---------------- */
+(function () {
+  'use strict';
+  if (typeof document === 'undefined' || !window.ACX) return;
+  const ACX = window.ACX;
+  const S = { parts: [], step: 'files', busy: false, reason: '', reviewed: false, running: false };
+  const M = { subjectId: '', date: '', label: '', section: 'A&B', status: 'present', reason: '', selected: new Set(), others: null, plan: null };
+  const R = { q: '', subjectId: '', from: '', to: '', label: '', edit: null, list: [] };
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  /* The page declares these with `let`, so they are shared global bindings, NOT window properties. */
+  const gUser = () => (typeof CURRENT_USER !== 'undefined' ? CURRENT_USER : null);
+  const gDB = () => (typeof DB !== 'undefined' ? DB : null);
+  const gHist = () => (typeof HISTORY !== 'undefined' && HISTORY ? HISTORY : []);
+  const isAdmin = () => !!(gUser() && gUser().role === 'admin');
+  const need = () => { if (!isAdmin()) { try { toast('Admin access required'); } catch (e) { } return false; } return true; };
+  const ctx = () => ({ students: (gDB() && gDB().students) || [], subjects: (gDB() && gDB().subjects) || [], history: gHist() });
+  const sb = () => window.supabaseClient;
+  const $ = id => document.getElementById(id);
+  const say = m => { try { toast(m); } catch (e) { } };
+
+  /* ---------- styles ---------- */
+  const css = document.createElement('style'); css.id = 'acxCss';
+  css.textContent = `
+  .role-student .acx-admin,.role-student #acxOverlay{display:none!important}
+  #acxOverlay{position:fixed;inset:0;z-index:260;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center}
+  #acxOverlay .acx-panel{background:var(--paper,#F1EDE1);color:var(--ink);width:100%;max-width:980px;height:96vh;border-radius:16px 16px 0 0;display:flex;flex-direction:column;overflow:hidden}
+  @media(min-width:900px){#acxOverlay{align-items:center}#acxOverlay .acx-panel{height:90vh;border-radius:16px}}
+  .acx-head{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid var(--rule);background:var(--surface)}
+  .acx-head h3{margin:0;font-size:15px}
+  .acx-body{padding:12px 14px 90px;overflow:auto;flex:1;-webkit-overflow-scrolling:touch}
+  .acx-tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+  .acx-card{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:12px;margin-bottom:10px}
+  .acx-card h4{margin:0 0 6px;font-size:13px}
+  .acx-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+  .acx-row>label{font-size:11px;color:var(--ink-soft);display:flex;flex-direction:column;gap:3px;flex:1;min-width:120px}
+  .acx-row input,.acx-row select,.acx-card textarea,.acx-card input[type=text],.acx-card input[type=date]{border:1px solid var(--rule);background:var(--surface);color:var(--ink);border-radius:9px;padding:9px;font-size:13px;width:100%;box-sizing:border-box;font-family:inherit}
+  .acx-chips{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}
+  .acx-chip{font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:99px;border:1px solid var(--rule);background:var(--surface)}
+  .acx-ok{color:var(--present);border-color:var(--present)}.acx-warn{color:#9a6b00;border-color:#c99a2e}.acx-bad{color:var(--absent);border-color:var(--absent)}
+  .acx-scroll{overflow:auto;max-width:100%}.acx-tbl{width:100%;border-collapse:collapse;font-size:11.5px}
+  .acx-tbl th,.acx-tbl td{text-align:left;padding:6px 6px;border-bottom:1px solid var(--rule);white-space:nowrap}
+  .acx-tbl th{font-size:10px;text-transform:uppercase;color:var(--ink-soft)}
+  .acx-note{font-size:11px;color:var(--ink-soft);margin:4px 0}
+  .acx-warnbox{padding:9px 11px;border-radius:9px;font-size:11.5px;background:rgba(201,154,46,.12);border:1px solid #c99a2e;margin:8px 0}
+  .acx-errbox{padding:9px 11px;border-radius:9px;font-size:11.5px;background:rgba(201,75,75,.08);border:1px solid rgba(201,75,75,.35);color:var(--absent);margin:8px 0}
+  .acx-foot{position:sticky;bottom:0;background:var(--surface);border-top:1px solid var(--rule);padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .acx-pick{max-height:240px;overflow:auto;border:1px solid var(--rule);border-radius:9px}
+  .acx-pick label{display:flex;gap:8px;align-items:center;padding:7px 9px;border-bottom:1px solid var(--rule);font-size:12px}
+  .acx-pick input{width:auto}
+  .acx-btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  details.acx-d{margin:6px 0}details.acx-d summary{cursor:pointer;font-size:12px;font-weight:700}
+  `;
+  document.head.appendChild(css);
+
+  /* ---------- overlay ---------- */
+  function openOv(title) {
+    let ov = $('acxOverlay');
+    if (!ov) { ov = document.createElement('div'); ov.id = 'acxOverlay'; document.body.appendChild(ov); }
+    ov.innerHTML = `<div class="acx-panel"><div class="acx-head"><h3 id="acxTitle"></h3><button class="close-x" onclick="acxClose()" aria-label="Close">✕</button></div><div class="acx-body" id="acxBody"></div><div id="acxFoot"></div></div>`;
+    $('acxTitle').textContent = title;
+  }
+  function setBody(html, foot) {
+    const b = $('acxBody'); if (!b) return; const top = b.scrollTop; b.innerHTML = html; b.scrollTop = top; $('acxFoot').innerHTML = foot || '';
+  }
+  window.acxClose = function () { const ov = $('acxOverlay'); if (ov) ov.remove(); };
+
+  /* ---------- SheetJS (loaded only when needed) ---------- */
+  let xlsxP = null;
+  function loadXLSX() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (!xlsxP) xlsxP = new Promise((res, rej) => { const s = document.createElement('script'); s.src = ACX.SHEETJS_URL; s.onload = () => res(window.XLSX); s.onerror = () => { xlsxP = null; rej(new Error('Could not load the spreadsheet reader (check your internet connection).')); }; document.head.appendChild(s); });
+    return xlsxP;
+  }
+  async function refresh() {
+    try { await window.syncSupabaseAttendance(); } catch (e) { console.error(e); }
+    try { render(); } catch (e) { console.error(e); }
+  }
+  const rpcErr = e => { const m = (e && (e.message || e.details)) || String(e); return /forbidden|42501|permission denied/i.test(m) ? 'Not allowed: you must be signed in with the Supabase administrator account. (' + m + ')' : /does not exist|schema cache|Could not find the function/i.test(m) ? 'The database migration has not been applied yet. Run the attendance-corrections SQL first. (' + m + ')' : m; };
+
+  /* ---------- template download ---------- */
+  window.acxTemplate = async function () {
+    if (!need()) return;
+    try {
+      const X = await loadXLSX(), c = ctx(), wb = X.utils.book_new();
+      const sub = (c.subjects[0] && c.subjects[0].name) || 'Subject name';
+      const ws = X.utils.aoa_to_sheet([['Student ID', 'Student Name', 'Subject', 'Date', 'Session', 'Status', 'Section'],
+        [(c.students[0] && c.students[0].id) || '1', (c.students[0] && c.students[0].name) || 'Example Student', sub, '2026-07-06', '1', 'Present', 'A&B'],
+        [(c.students[1] && c.students[1].id) || '2', (c.students[1] && c.students[1].name) || 'Example Student 2', sub, '2026-07-06', '1', 'Absent', 'A&B']]);
+      ws['!cols'] = [{ wch: 14 }, { wch: 24 }, { wch: 24 }, { wch: 12 }, { wch: 9 }, { wch: 10 }, { wch: 9 }];
+      X.utils.book_append_sheet(wb, ws, 'Attendance');
+      X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['Student ID', '2026-07-06 S1', '2026-07-06 S2', '2026-07-07 S1'], ['1', 'P', 'P', 'A'], ['2', 'A', 'A', 'P']]), 'Example (do not import)');
+      X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([
+        ['HOW TO FILL THIS TEMPLATE'], [''],
+        ['One file per subject. Use the "Attendance" sheet: ONE ROW per student per session.'],
+        ['Student ID: roll number exactly as in Acadcom. Date: YYYY-MM-DD (or DD/MM/YYYY). Session: the session number, e.g. 1, 2, 3 (each 3-hour class = two sessions).'],
+        ['Status: Present / Absent (P / A also accepted). Section (optional): A, B or A&B — default A&B.'],
+        ['Alternative layout: Student ID in column A and one column per class like "2026-07-06 S1" holding P/A (see the example sheet).'],
+        ['A date column WITHOUT a session number is flagged in the preview; you must assign the session there. Combined entries such as "3-4" stay ONE record unless you explicitly confirm a split.'],
+        ['Blank attendance cells are ignored (they are NOT treated as absent).'],
+        ['Duplicates are skipped automatically; nothing is saved until you confirm in the preview.']]), 'Instructions');
+      X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['Student ID', 'Name', 'Section'], ...c.students.map(s => [s.id, s.name, s.section])]), 'Students');
+      X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['Subject', 'Code'], ...c.subjects.map(s => [s.name, s.code || ''])]), 'Subjects');
+      X.writeFile(wb, 'Acadcom_Historical_Attendance_Template.xlsx');
+    } catch (e) { say(e.message || 'Template could not be created'); }
+  };
+
+  /* =====================================================================
+     1) IMPORT HISTORICAL ATTENDANCE
+     ===================================================================== */
+  window.acxOpenImport = function () {
+    if (!need()) return;
+    S.parts = []; S.step = 'files'; S.reason = ''; S.reviewed = false;
+    openOv('Import Historical Attendance'); renderImport();
+  };
+  const SKIP_SHEET = /^(instructions?|readme|students?|subjects?|help|example)/i;
+  async function readParts(file) {
+    const X = await loadXLSX(); let wb;
+    if (/\.csv$/i.test(file.name)) wb = X.read(await file.text(), { type: 'string', raw: true });   /* raw: keep DD/MM/YYYY text untouched */
+    else wb = X.read(await file.arrayBuffer(), { type: 'array' });
+    const names = wb.SheetNames.filter(n => !SKIP_SHEET.test(n)); const out = [];
+    names.forEach(sn => {
+      const aoa = X.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' });
+      const p = ACX.parseRows(aoa);
+      out.push({ name: names.length > 1 ? `${file.name} › ${sn}` : file.name, ...p });
+    });
+    return out;
+  }
+  function autoMap(part) {
+    const c = ctx(); let subj = null; const cnt = {};
+    (part.rows || []).forEach(r => { if (r.subjectText) cnt[r.subjectText] = (cnt[r.subjectText] || 0) + 1; });
+    const top = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0]; if (top) subj = ACX.matchSubject(top, c.subjects);
+    if (!subj) { const nk = ACX.normKey(part.name); subj = c.subjects.find(s => nk.includes(ACX.normKey(s.name)) || (s.code && nk.includes(ACX.normKey(s.code)))) || null; }
+    const dates = (part.rows || []).map(r => r.date).filter(Boolean).sort();
+    part.mapping = { subjectId: subj ? subj.id : '', from: dates[0] || '', to: dates[dates.length - 1] || '', section: 'A&B', sessionByDate: {}, split: {}, addMissingAbsent: false, idMap: {} };
+  }
+  window.acxPickFiles = async function (input) {
+    if (!need()) return; const files = Array.from(input.files || []); input.value = '';
+    if (!files.length) return;
+    for (const f of files) {
+      try {
+        const parts = await readParts(f);
+        parts.forEach(p => { if (p.rows && p.rows.length > ACX.MAX_ROWS_PER_FILE) { p.error = `Too many rows (${p.rows.length}). Split the file (max ${ACX.MAX_ROWS_PER_FILE}).`; p.rows = []; } if (!p.error) autoMap(p); S.parts.push(p); });
+      } catch (e) { S.parts.push({ name: f.name, error: e.message || 'Could not read this file', rows: [] }); }
+    }
+    S.step = 'files'; renderImport();
+  };
+  window.acxRemovePart = function (i) { S.parts.splice(i, 1); S.step = 'files'; renderImport(); };
+  window.acxSetMap = function (i, f, v) { const p = S.parts[i]; if (!p || !p.mapping) return; p.mapping[f] = f === 'addMissingAbsent' ? !!v : v; if (S.step === 'preview') { p.plan = null; renderImport(); } };
+  window.acxSetSess = function (i, date, v) { const p = S.parts[i]; v = String(v || '').trim(); if (!v) delete p.mapping.sessionByDate[date]; else { const s = ACX.parseSession(v); if (!s) { say('Enter a valid session number like 2 or 3-4'); return; } p.mapping.sessionByDate[date] = s.label; } rebuild(); };
+  window.acxSetSplit = function (i, key, on) { S.parts[i].mapping.split[key] = !!on; rebuild(); };
+  window.acxMapId = function (i, fileKey, val) { const roll = String(val || '').split(' · ')[0].trim(); const p = S.parts[i]; if (!roll) delete p.mapping.idMap[fileKey]; else p.mapping.idMap[fileKey] = roll; rebuild(); };
+  function rebuild() { S.parts.forEach(p => { p.plan = null; }); renderImport(); }
+
+  window.acxBuildPreview = async function () {
+    if (!need()) return;
+    const bad = S.parts.filter(p => !p.error && p.mapping && !p.mapping.subjectId);
+    if (!S.parts.some(p => !p.error)) { say('Add at least one valid file first.'); return; }
+    if (bad.length) { say('Choose a subject for: ' + bad.map(b => b.name).join(', ')); return; }
+    say('Checking current attendance…'); await (async () => { try { await window.syncSupabaseAttendance(); } catch (e) { } })();
+    S.step = 'preview'; S.reviewed = false; rebuild();
+  };
+  window.acxBackToFiles = function () { S.step = 'files'; renderImport(); };
+
+  function planOf(p) { if (!p.plan) p.plan = ACX.planImport(p, ctx()); return p.plan; }
+  const KIND = { unmatched_student: 'Unmatched students', no_account: 'Students without a login account', invalid_date: 'Invalid dates', invalid_status: 'Invalid status', invalid_session: 'Invalid session', out_of_range: 'Outside the date range', subject_mismatch: 'Subject mismatch', section_mismatch: 'Section mismatch', missing_session: 'Missing session', duplicate: 'Duplicates (will be skipped)', status_conflict: 'Conflicts with existing record', overlap_conflict: 'Session overlap conflicts', in_file_conflict: 'Conflicting rows inside the file', unknown_subject: 'No subject' };
+
+  function renderImport() {
+    if (S.step === 'files') {
+      const c = ctx();
+      const cards = S.parts.map((p, i) => {
+        if (p.error) return `<div class="acx-card"><h4>${esc(p.name)}</h4><div class="acx-errbox">${esc(p.error)}</div><button class="btn btn-sm" onclick="acxRemovePart(${i})">Remove</button></div>`;
+        const m = p.mapping;
+        return `<div class="acx-card"><h4>${esc(p.name)}</h4>
+          <div class="acx-note">${p.format === 'matrix' ? 'Matrix layout (one column per class)' : 'One row per student per session'} · ${p.rows.length} attendance entries${p.blanks ? ` · ${p.blanks} blank cells ignored` : ''}</div>
+          <div class="acx-row"><label>Subject<select onchange="acxSetMap(${i},'subjectId',this.value)"><option value="">— choose subject —</option>${c.subjects.map(s => `<option value="${esc(s.id)}" ${String(s.id) === String(m.subjectId) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+          <label>Section<select onchange="acxSetMap(${i},'section',this.value)">${['A&B', 'A', 'B'].map(x => `<option ${m.section === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
+          <div class="acx-row"><label>From date<input type="date" value="${esc(m.from)}" onchange="acxSetMap(${i},'from',this.value)"></label><label>To date<input type="date" value="${esc(m.to)}" onchange="acxSetMap(${i},'to',this.value)"></label></div>
+          <button class="btn btn-sm" onclick="acxRemovePart(${i})">Remove file</button></div>`;
+      }).join('');
+      setBody(`<div class="acx-card"><h4>1 · Choose subject-wise files</h4>
+        <p class="acx-note">Upload one or more .xlsx / .csv files (one per subject). Nothing is saved until you review the preview and confirm.</p>
+        <div class="acx-btnrow"><button class="btn" onclick="acxTemplate()">⬇ Download Excel template</button>
+        <label class="btn btn-primary" style="cursor:pointer">＋ Add files<input type="file" accept=".xlsx,.xls,.csv" multiple style="display:none" onchange="acxPickFiles(this)"></label></div></div>
+        ${cards || '<div class="empty">No files added yet.</div>'}`,
+        `<div class="acx-foot"><button class="btn btn-primary" ${S.parts.some(p => !p.error) ? '' : 'disabled'} onclick="acxBuildPreview()">Preview import →</button><button class="btn" onclick="acxClose()">Close</button></div>`);
+      return;
+    }
+    if (S.step === 'done') return renderDone();
+    /* preview */
+    const c = ctx(); let totalInsert = 0;
+    const roster = `<datalist id="acxRoster">${c.students.map(s => `<option value="${esc(s.id)} · ${esc(s.name)}"></option>`).join('')}</datalist>`;
+    const html = S.parts.filter(p => !p.error).map(p => {
+      const i = S.parts.indexOf(p), pl = planOf(p), sm = pl.summary, m = p.mapping; totalInsert += pl.payload.length;
+      const chip = (n, t, cls) => n ? `<span class="acx-chip ${cls}">${n} ${t}</span>` : '';
+      const byKind = {}; pl.rows.forEach(r => { if (r.kind !== 'insert') (byKind[r.kind] = byKind[r.kind] || []).push(r); });
+      const sessNeeds = [...new Set(pl.rows.filter(r => r.kind === 'missing_session').map(r => r.date))].sort();
+      const unm = Object.entries(pl.unmatchedIds);
+      const issues = Object.keys(byKind).filter(k => k !== 'unmatched_student' && k !== 'missing_session').map(k => `<details class="acx-d"><summary>${KIND[k] || k} (${byKind[k].length})</summary><div class="acx-scroll"><table class="acx-tbl"><tr><th>Row</th><th>Student</th><th>Date</th><th>Reason</th></tr>${byKind[k].slice(0, 100).map(r => `<tr><td>${r.rowNo}</td><td>${esc(r.roll || r.fileId)}</td><td>${esc(r.date || '')}</td><td style="white-space:normal">${esc(r.reason)}</td></tr>`).join('')}</table>${byKind[k].length > 100 ? `<div class="acx-note">…and ${byKind[k].length - 100} more</div>` : ''}</div></details>`).join('');
+      const missingTotal = pl.groups.reduce((a, g) => a + (g.counts.insert ? g.missing.filter(x => x.auth_user_id).length : 0), 0);
+      const groups = pl.groups.map(g => `<tr><td>${esc(g.date)}</td><td>${esc(g.label)}</td><td>${g.counts.insert}</td><td>${g.counts.duplicate}</td><td>${g.counts.conflict}</td>
+        <td>${g.clash ? '<span class="acx-chip acx-bad">overlaps existing</span>' : g.existing ? '<span class="acx-chip acx-warn">adds to existing session</span>' : '<span class="acx-chip acx-ok">new session</span>'}</td>
+        <td style="white-space:normal">${g.combined && !g.existing ? `<label style="font-size:11px"><input type="checkbox" ${m.split[g.key] ? 'checked' : ''} onchange="acxSetSplit(${i},this.dataset.k,this.checked)" data-k="${esc(g.key)}"> split into sessions ${ACX.sessionNums(g.label).join(' & ')}</label>` : ''}</td></tr>`).join('');
+      return `<div class="acx-card"><h4>${esc(p.name)} → ${esc(pl.subject ? pl.subject.name : '?')}</h4>
+        <div class="acx-chips">${chip(sm.insert, 'to import', 'acx-ok')}${chip(sm.duplicate, 'duplicates', 'acx-warn')}${chip(sm.conflict, 'conflicts', 'acx-bad')}${chip(sm.unmatched, 'unmatched', 'acx-bad')}${chip(sm.noAccount, 'no account', 'acx-bad')}${chip(sm.missingSession, 'missing session', 'acx-bad')}${chip(sm.invalid, 'invalid', 'acx-bad')}${chip(sm.blank, 'blank cells ignored', '')}</div>
+        ${sessNeeds.length ? `<div class="acx-warnbox"><b>Session missing</b> for these dates. Each class has two sessions, so the app will not guess — enter the session number (e.g. 1, 2, or 3-4):<div class="acx-row">${sessNeeds.map(d => `<label>${esc(d)}<input type="text" inputmode="numeric" placeholder="session" data-d="${esc(d)}" value="${esc(m.sessionByDate[d] || '')}" onchange="acxSetSess(${i},this.dataset.d,this.value)"></label>`).join('')}</div></div>` : ''}
+        ${unm.length ? `<details class="acx-d" open><summary>Unmatched student IDs (${unm.length}) — map them to the roster</summary>${unm.map(([k, u]) => `<div class="acx-row"><span style="font-size:12px;min-width:110px"><b>${esc(u.id || '(blank)')}</b> ${esc(u.name)} · ${u.count} rows</span><input type="text" list="acxRoster" placeholder="Search roster…" data-k="${esc(k)}" onchange="acxMapId(${i},this.dataset.k,this.value)" style="flex:1;min-width:160px"></div>`).join('')}</details>` : ''}
+        ${missingTotal ? `<div class="acx-warnbox"><b>${missingTotal} roster entries are not in this file</b> for the imported sessions. Acadcom's existing percentage logic counts a student who is absent from a session record as <b>Absent</b>. <label style="display:block;margin-top:6px"><input type="checkbox" ${m.addMissingAbsent ? 'checked' : ''} onchange="acxSetMap(${i},'addMissingAbsent',this.checked)"> Record them explicitly as Absent</label></div>` : ''}
+        <details class="acx-d" open><summary>Sessions (${pl.groups.length})</summary><div class="acx-scroll"><table class="acx-tbl"><tr><th>Date</th><th>Session</th><th>Import</th><th>Dup</th><th>Conflict</th><th>Status</th><th>Combined entry</th></tr>${groups}</table></div></details>
+        ${issues}
+        ${S.parts[i].result ? `<div class="${S.parts[i].result.ok ? 'acx-note' : 'acx-errbox'}">${esc(S.parts[i].result.msg)}</div>` : ''}</div>`;
+    }).join('');
+    const pending = S.parts.filter(p => !p.error && !(p.result && p.result.ok) && planOf(p).payload.length);
+    setBody(`${roster}<div class="acx-card"><h4>2 · Review before saving</h4><p class="acx-note">Review matched/unmatched students, duplicates, conflicts and missing sessions. Rows with problems are <b>not</b> imported. You can go back to fix mappings or re-upload a corrected file.</p></div>${html}
+      <div class="acx-card"><h4>3 · Confirm</h4><label class="acx-note">Reason / note recorded in the audit trail</label><input type="text" id="acxImpReason" value="${esc(S.reason || 'Historical attendance import')}" oninput="acxState('reason',this.value)">
+      <label style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px"><input type="checkbox" ${S.reviewed ? 'checked' : ''} onchange="acxState('reviewed',this.checked);renderImportFoot()"> I have reviewed this preview and want to import ${totalInsert} attendance records.</label></div>`, '');
+    renderImportFoot(pending.length, totalInsert);
+  }
+  window.acxState = (k, v) => { S[k] = v; };
+  window.renderImportFoot = function (pendingCount, total) {
+    const pend = S.parts.filter(p => !p.error && !(p.result && p.result.ok) && planOf(p).payload.length);
+    const tot = pend.reduce((a, p) => a + planOf(p).payload.length, 0);
+    $('acxFoot').innerHTML = `<div class="acx-foot"><button class="btn" onclick="acxBackToFiles()">← Back to mapping</button><button class="btn" onclick="rebuildPreview()">↻ Re-check</button><button class="btn btn-primary" ${S.reviewed && tot && !S.running ? '' : 'disabled'} onclick="acxConfirmImport()">${S.running ? 'Importing…' : `Confirm & import ${tot} records`}</button></div>`;
+  };
+  window.rebuildPreview = async function () { try { await window.syncSupabaseAttendance(); } catch (e) { } rebuild(); };
+
+  window.acxConfirmImport = async function () {
+    if (!need() || S.running) return;
+    const reason = (S.reason || '').trim() || 'Historical attendance import';
+    if (!sb()) { say('Not connected to Supabase'); return; }
+    S.running = true; renderImportFoot();
+    for (const p of S.parts) {
+      if (p.error || (p.result && p.result.ok)) continue;
+      const pl = planOf(p); if (!pl.payload.length) continue;
+      try {
+        const key = await ACX.batchKey(pl.payload, p.mapping.subjectId);
+        const { data, error } = await sb().rpc('acadcom_import_attendance', { p_rows: pl.payload, p_batch_key: key, p_file_name: p.name, p_reason: reason });
+        if (error) throw error;
+        const ok = data.status === 'committed' || data.status === 'already_imported' || data.status === 'nothing_imported';
+        p.result = { ok, msg: data.status === 'already_imported' ? 'This exact file was already imported — nothing changed.' : `Imported ${data.inserted}, skipped ${data.skipped_duplicate} duplicates, ${data.conflicts} conflicts, ${data.invalid} invalid.` };
+      } catch (e) { p.result = { ok: false, msg: 'FAILED — nothing from this file was saved. ' + rpcErr(e) }; }
+    }
+    S.running = false;
+    await refresh();
+    S.step = 'done'; renderImport();
+  };
+  function renderDone() {
+    const failed = S.parts.filter(p => p.result && !p.result.ok);
+    setBody(`<div class="acx-card"><h4>${failed.length ? 'Import finished with problems' : 'Import complete'}</h4><p class="acx-note">Dashboards, subject-wise percentages and reports have been refreshed from the database.</p></div>
+      ${S.parts.filter(p => p.result).map(p => `<div class="acx-card"><h4>${esc(p.name)}</h4><div class="${p.result.ok ? 'acx-note' : 'acx-errbox'}">${esc(p.result.msg)}</div></div>`).join('')}`,
+      `<div class="acx-foot">${failed.length ? '<button class="btn btn-primary" onclick="acxRetry()">Retry failed files</button>' : ''}<button class="btn" onclick="acxBackToFiles()">Import more files</button><button class="btn" onclick="acxClose()">Close</button></div>`);
+  }
+  window.acxRetry = async function () { S.step = 'preview'; try { await window.syncSupabaseAttendance(); } catch (e) { } S.parts.forEach(p => { if (p.result && !p.result.ok) p.result = null; p.plan = null; }); S.reviewed = true; renderImport(); };
+
+  /* =====================================================================
+     2) MANUAL ATTENDANCE ENTRY / CORRECTION
+     ===================================================================== */
+  window.acxOpenManual = function () { if (!need()) return; M.plan = null; M.others = null; openOv('Manual Attendance Entry / Correction'); renderManual(); };
+  function renderManual() {
+    const c = ctx();
+    const picks = c.students.map(s => `<label data-s="${esc((s.id + ' ' + s.name).toLowerCase())}"><input type="checkbox" value="${esc(s.id)}" ${M.selected.has(String(s.id)) ? 'checked' : ''} onchange="acxToggleStu(this)"> <b>${esc(s.id)}</b> ${esc(s.name)} <span class="acx-note">· ${esc(s.section || '')}${s.auth_user_id ? '' : ' · no account'}</span></label>`).join('');
+    const pl = M.plan;
+    const eff = { add: ['Add', 'acx-ok'], change: ['Change', 'acx-warn'], nochange: ['No change', ''], blocked: ['Blocked', 'acx-bad'] };
+    const preview = pl ? (pl.errors.length ? `<div class="acx-errbox">${pl.errors.map(esc).join('<br>')}</div>` : `<div class="acx-card"><h4>Preview</h4>
+      <div class="acx-note">${pl.sessionExists ? 'This session already exists — no new session will be created.' : 'This is a <b>new session</b> (no attendance recorded for it yet).'}</div>
+      <div class="acx-scroll"><table class="acx-tbl"><tr><th>Roll</th><th>Student</th><th>Current</th><th>New</th><th>Effect</th></tr>${pl.rows.map(r => `<tr><td>${esc(r.roll)}</td><td>${esc(r.name)}</td><td>${esc(r.before || '—')}</td><td>${esc(r.after)}</td><td><span class="acx-chip ${eff[r.effect][1]}">${eff[r.effect][0]}</span> ${esc(r.note)}</td></tr>`).join('')}</table></div>
+      ${pl.needsOthers ? `<div class="acx-warnbox"><b>Decision needed.</b> A new session counts for the whole roster, and students without a record are counted as Absent by the existing logic. The other ${pl.others.length} students should be recorded as:
+        <label style="display:block;margin-top:6px"><input type="radio" name="acxOth" ${M.others === 'absent' ? 'checked' : ''} onchange="acxOthers('absent')"> Absent</label><label style="display:block"><input type="radio" name="acxOth" ${M.others === 'present' ? 'checked' : ''} onchange="acxOthers('present')"> Present</label></div>` : ''}
+      <label class="acx-note">Reason for this entry/correction (mandatory)</label><input type="text" id="acxMReason" value="${esc(M.reason)}" oninput="M_reason(this.value)" placeholder="e.g. Faculty register shows student attended">
+      <div class="acx-note">${pl.payload.length} database changes will be applied together (all-or-nothing) and written to the audit trail.</div></div>`) : '';
+    setBody(`<div class="acx-card"><h4>Select class and students</h4>
+      <div class="acx-row"><label>Subject<select id="acxMSub" onchange="acxM('subjectId',this.value)"><option value="">— choose —</option>${c.subjects.map(s => `<option value="${esc(s.id)}" ${String(s.id) === String(M.subjectId) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+      <label>Date<input type="date" id="acxMDate" value="${esc(M.date)}" onchange="acxM('date',this.value)"></label></div>
+      <div class="acx-row"><label>Session no.<input type="text" inputmode="numeric" id="acxMLabel" placeholder="e.g. 2" value="${esc(M.label)}" onchange="acxM('label',this.value)"></label>
+      <label>Section (new session only)<select onchange="acxM('section',this.value)">${['A&B', 'A', 'B'].map(x => `<option ${M.section === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+      <label>Mark as<select onchange="acxM('status',this.value)"><option value="present" ${M.status === 'present' ? 'selected' : ''}>Present</option><option value="absent" ${M.status === 'absent' ? 'selected' : ''}>Absent</option></select></label></div>
+      <div class="acx-row"><label>Find student<input type="text" placeholder="Roll or name" oninput="acxFilterStu(this.value)"></label></div>
+      <div class="acx-pick" id="acxPick">${picks}</div>
+      <div class="acx-btnrow"><button class="btn btn-sm" onclick="acxSelVisible(true)">Select visible</button><button class="btn btn-sm" onclick="acxSelVisible(false)">Clear visible</button><span class="acx-note" id="acxSelCount">${M.selected.size} selected</span></div>
+      <details class="acx-d"><summary>Paste roll numbers</summary><textarea id="acxPaste" rows="3" placeholder="One per line, or separated by commas/spaces"></textarea><button class="btn btn-sm" onclick="acxApplyPaste()">Select these</button></details></div>${preview}`,
+      `<div class="acx-foot"><button class="btn" onclick="acxManualPreview()">Preview</button><button class="btn btn-primary" ${pl && !pl.errors.length && pl.payload.length && (!pl.needsOthers || M.others) ? '' : 'disabled'} onclick="acxManualApply()">Apply changes</button><button class="btn" onclick="acxClose()">Close</button></div>`);
+  }
+  window.M_reason = v => { M.reason = v; };
+  window.acxM = (k, v) => { M[k] = v; M.plan = null; if (k !== 'status') M.others = null; renderManual(); };
+  window.acxOthers = v => { M.others = v; M.plan = null; acxManualPreview(true); };
+  window.acxToggleStu = el => { el.checked ? M.selected.add(String(el.value)) : M.selected.delete(String(el.value)); M.plan = null; const n = $('acxSelCount'); if (n) n.textContent = M.selected.size + ' selected'; };
+  window.acxFilterStu = q => { q = String(q || '').toLowerCase().trim(); document.querySelectorAll('#acxPick label').forEach(l => { l.style.display = !q || l.dataset.s.includes(q) ? '' : 'none'; }); };
+  window.acxSelVisible = on => { document.querySelectorAll('#acxPick label').forEach(l => { if (l.style.display === 'none') return; const cb = l.querySelector('input'); cb.checked = on; on ? M.selected.add(String(cb.value)) : M.selected.delete(String(cb.value)); }); M.plan = null; $('acxSelCount').textContent = M.selected.size + ' selected'; };
+  window.acxApplyPaste = () => { const toks = ($('acxPaste').value || '').split(/[\s,;]+/).filter(Boolean); const c = ctx(); const miss = []; toks.forEach(t => { const s = c.students.find(x => ACX.normKey(x.id) === ACX.normKey(t) || String(x.id) === t); if (s) M.selected.add(String(s.id)); else miss.push(t); }); M.plan = null; renderManual(); if (miss.length) say('Not found: ' + miss.slice(0, 6).join(', ')); };
+  window.acxManualPreview = async function (keep) {
+    if (!need()) return; if (!keep) { try { await window.syncSupabaseAttendance(); } catch (e) { } }
+    M.plan = ACX.planManual({ subjectId: M.subjectId, date: M.date, label: M.label, section: M.section, rolls: [...M.selected], status: M.status, others: M.others }, ctx());
+    renderManual();
+  };
+  window.acxManualApply = async function () {
+    if (!need() || !M.plan) return; const reason = (M.reason || '').trim();
+    if (reason.length < 3) { say('A correction reason is mandatory'); return; }
+    if (!sb()) { say('Not connected to Supabase'); return; }
+    try {
+      const { data, error } = await sb().rpc('acadcom_apply_corrections', { p_changes: M.plan.payload, p_reason: reason });
+      if (error) throw error;
+      say(`Done: ${data.added} added, ${data.updated} changed, ${data.unchanged} unchanged${data.refused ? ', ' + data.refused + ' refused (overlap)' : ''}`);
+      M.plan = null; M.selected = new Set(); M.others = null; M.reason = '';
+      await refresh(); renderManual();
+    } catch (e) { setBody($('acxBody').innerHTML + `<div class="acx-errbox">Nothing was saved. ${esc(rpcErr(e))}</div>`, $('acxFoot').innerHTML); }
+  };
+
+  /* =====================================================================
+     3) FIND & EDIT INDIVIDUAL RECORDS   +   4) AUDIT LOG
+     ===================================================================== */
+  window.acxOpenRecords = function (rollPrefill) { if (!need()) return; R.edit = null; if (rollPrefill) R.q = String(rollPrefill); openOv('Attendance Records'); renderRecords(); };
+  const tabs = on => `<div class="acx-tabs"><button class="btn btn-sm ${on === 'r' ? 'btn-primary' : ''}" onclick="acxOpenRecords()">Records</button><button class="btn btn-sm ${on === 'a' ? 'btn-primary' : ''}" onclick="acxOpenAudit()">Audit log</button></div>`;
+  function rawRows() {
+    const c = ctx(), byAuth = {}; c.students.forEach(s => { if (s.auth_user_id) byAuth[String(s.auth_user_id)] = s; });
+    return (window.SUPABASE_ATTENDANCE || []).map(r => { const st = byAuth[String(r.student_id)]; return { raw: r, roll: st ? String(st.id) : '', name: st ? st.name : '(unlinked)' }; });
+  }
+  function renderRecords() {
+    if (R.edit) return renderEdit();
+    const c = ctx(); const q = R.q.toLowerCase().trim();
+    let list = rawRows().filter(x => (!q || (x.roll + ' ' + x.name).toLowerCase().includes(q)) && (!R.subjectId || String(x.raw.subject_id) === String(R.subjectId)) && (!R.from || x.raw.attendance_date >= R.from) && (!R.to || x.raw.attendance_date <= R.to) && (!R.label || String(x.raw.session_label) === String(R.label)));
+    list.sort((a, b) => String(b.raw.attendance_date).localeCompare(String(a.raw.attendance_date)) || String(a.raw.session_label).localeCompare(String(b.raw.session_label), undefined, { numeric: true }) || a.roll.localeCompare(b.roll, undefined, { numeric: true }));
+    R.list = list.slice(0, 100);
+    setBody(`${tabs('r')}<div class="acx-card"><h4>Find a record</h4>
+      <div class="acx-row"><label>Student ID / name<input type="text" value="${esc(R.q)}" onchange="acxR('q',this.value)" placeholder="e.g. 12 or Asha"></label>
+      <label>Subject<select onchange="acxR('subjectId',this.value)"><option value="">All subjects</option>${c.subjects.map(s => `<option value="${esc(s.id)}" ${String(s.id) === String(R.subjectId) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
+      <div class="acx-row"><label>From<input type="date" value="${esc(R.from)}" onchange="acxR('from',this.value)"></label><label>To<input type="date" value="${esc(R.to)}" onchange="acxR('to',this.value)"></label><label>Session<input type="text" value="${esc(R.label)}" onchange="acxR('label',this.value)" placeholder="any"></label></div></div>
+      <div class="acx-note">${list.length} matching records${list.length > 100 ? ' — showing the newest 100, narrow the filters to see others' : ''}</div>
+      <div class="acx-scroll"><table class="acx-tbl"><tr><th>Roll</th><th>Student</th><th>Subject</th><th>Date</th><th>Session</th><th>Status</th><th></th></tr>
+      ${R.list.map((x, i) => `<tr><td>${esc(x.roll)}</td><td>${esc(x.name)}</td><td>${esc(x.raw.subject_name || '')}</td><td>${esc(x.raw.attendance_date)}</td><td>${esc(x.raw.session_label || '')}</td><td><span class="acx-chip ${String(x.raw.status).toLowerCase() === 'present' ? 'acx-ok' : 'acx-bad'}">${esc(x.raw.status)}</span></td><td><button class="btn btn-sm" onclick="acxEdit(${i})">Edit Attendance</button></td></tr>`).join('') || '<tr><td colspan="7" class="acx-note">No records match.</td></tr>'}</table></div>`,
+      `<div class="acx-foot"><button class="btn" onclick="acxClose()">Close</button></div>`);
+  }
+  window.acxR = (k, v) => { R[k] = v; renderRecords(); };
+  window.acxEdit = i => { R.edit = R.list[i]; R.err = ''; renderEdit(); };
+  function renderEdit() {
+    const x = R.edit, r = x.raw, c = ctx(); const same = rawRows().filter(y => r.session_id && y.raw.session_id === r.session_id).length;
+    const cur = String(r.status).toLowerCase();
+    setBody(`<div class="acx-card"><h4>Edit Attendance</h4>
+      <div class="acx-note"><b>${esc(x.roll)} · ${esc(x.name)}</b><br>${esc(r.subject_name || '')} · ${esc(r.attendance_date)} · Session ${esc(r.session_label || '')}</div>
+      <div class="acx-row"><label>Status<select id="acxEStatus"><option value="present" ${cur === 'present' ? 'selected' : ''}>Present</option><option value="absent" ${cur === 'absent' ? 'selected' : ''}>Absent</option></select></label></div>
+      <label class="acx-note">Correction reason (mandatory)</label><input type="text" id="acxEReason" placeholder="Why is this being corrected?">
+      ${R.err ? `<div class="acx-errbox">${esc(R.err)}</div>` : ''}
+      <div class="acx-btnrow"><button class="btn btn-primary" onclick="acxSaveEdit()">Save</button><button class="btn" onclick="acxCancelEdit()">Cancel</button></div></div>
+      <details class="acx-d"><summary>Edit session details (date / subject / session)</summary><div class="acx-card">
+      ${r.session_id ? `<div class="acx-warnbox">Attendance is stored per session. Changing these fields moves <b>all ${same} students</b> of this session together (so totals never inflate). It is refused if the target slot already has attendance for the same students.</div>
+      <div class="acx-row"><label>Date<input type="date" id="acxSDate" value="${esc(r.attendance_date)}"></label><label>Session<input type="text" id="acxSLabel" value="${esc(r.session_label || '')}"></label></div>
+      <div class="acx-row"><label>Subject<select id="acxSSub">${c.subjects.map(s => `<option value="${esc(s.id)}" ${String(s.id) === String(r.subject_id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label></div>
+      <label class="acx-note">Reason (mandatory)</label><input type="text" id="acxSReason"><button class="btn" style="margin-top:8px" onclick="acxSaveSession()">Save session details</button>`
+        : '<div class="acx-note">This older record has no session id, so its date/subject/session cannot be changed safely. You can still correct its status.</div>'}</div></details>`,
+      `<div class="acx-foot"><button class="btn" onclick="acxCancelEdit()">← Back to records</button></div>`);
+  }
+  window.acxCancelEdit = () => { R.edit = null; renderRecords(); };
+  window.acxSaveEdit = async function () {
+    if (!need() || !R.edit) return; const r = R.edit.raw, st = $('acxEStatus').value, reason = ($('acxEReason').value || '').trim();
+    if (reason.length < 3) { R.err = 'A correction reason is mandatory.'; renderEdit(); return; }
+    if (String(r.status).toLowerCase() === st) { R.err = 'Status is unchanged.'; renderEdit(); return; }
+    try {
+      const { data, error } = await sb().rpc('acadcom_apply_corrections', { p_changes: [{ student_id: r.student_id, subject_id: r.subject_id, attendance_date: r.attendance_date, session_label: r.session_label, session_id: r.session_id, section: r.section, subject_name: r.subject_name, new_status: st }], p_reason: reason });
+      if (error) throw error; say(data.updated ? 'Attendance updated' : 'No change was needed');
+      R.edit = null; await refresh(); renderRecords();
+    } catch (e) { R.err = rpcErr(e); renderEdit(); }
+  };
+  window.acxSaveSession = async function () {
+    if (!need() || !R.edit) return; const r = R.edit.raw, reason = ($('acxSReason').value || '').trim();
+    if (reason.length < 3) { R.err = 'A correction reason is mandatory.'; renderEdit(); return; }
+    const sid = $('acxSSub').value, sub = ctx().subjects.find(s => String(s.id) === String(sid)); const lab = ACX.parseSession($('acxSLabel').value);
+    if (!lab) { R.err = 'Enter a valid session number.'; renderEdit(); return; }
+    if (!confirm('Move the whole session (all students) to the new date/subject/session?')) return;
+    try {
+      const { data, error } = await sb().rpc('acadcom_edit_session_details', { p_session_id: r.session_id, p_new_date: $('acxSDate').value, p_new_subject_id: String(sid), p_new_subject_name: sub ? sub.name : null, p_new_label: lab.label, p_reason: reason });
+      if (error) throw error; say(`Session updated (${data.rows_moved} records)`);
+      R.edit = null; await refresh(); renderRecords();
+    } catch (e) { R.err = rpcErr(e); renderEdit(); }
+  };
+
+  const A = { q: '', rows: null, err: '' };
+  window.acxOpenAudit = async function () {
+    if (!need()) return; if (!$('acxOverlay')) openOv('Attendance Records'); R.edit = null;
+    setBody(`${tabs('a')}<div class="acx-note">Loading audit log…</div>`, ''); A.err = '';
+    try { const { data, error } = await sb().from('attendance_audit').select('*').order('changed_at', { ascending: false }).limit(500); if (error) throw error; A.rows = data || []; } catch (e) { A.rows = []; A.err = rpcErr(e); }
+    renderAudit();
+  };
+  function renderAudit() {
+    const q = A.q.toLowerCase().trim();
+    const rows = (A.rows || []).filter(r => !q || [r.student_roll, r.student_name, r.subject_name, r.reason, r.action].join(' ').toLowerCase().includes(q));
+    setBody(`${tabs('a')}${A.err ? `<div class="acx-errbox">${esc(A.err)}</div>` : ''}<div class="acx-row"><label>Filter<input type="text" value="${esc(A.q)}" onchange="acxAQ(this.value)" placeholder="student, subject, reason, action"></label></div>
+      <div class="acx-note">${rows.length} entries (newest 500 loaded). The audit log is append-only.</div>
+      <div class="acx-scroll"><table class="acx-tbl"><tr><th>When</th><th>Admin</th><th>Action</th><th>Student</th><th>Subject</th><th>Date</th><th>Sess.</th><th>Before → After</th><th>Reason</th></tr>
+      ${rows.map(r => `<tr><td>${esc(new Date(r.changed_at).toLocaleString())}</td><td>${esc(r.changed_by_name || '')}</td><td>${esc(r.action)}</td><td>${esc((r.student_roll || '') + ' ' + (r.student_name || ''))}</td><td>${esc(r.subject_name || '')}</td><td>${esc(r.attendance_date || '')}</td><td>${esc(r.session_label || '')}</td>
+      <td>${r.action === 'session_edit' ? esc(JSON.stringify(r.old_values || {}).slice(0, 80)) + ' → ' + esc(JSON.stringify(r.new_values || {}).slice(0, 80)) : esc((r.old_status || '—') + ' → ' + (r.new_status || ''))}</td><td style="white-space:normal">${esc(r.reason)}</td></tr>`).join('') || '<tr><td colspan="9" class="acx-note">No entries.</td></tr>'}</table></div>`, `<div class="acx-foot"><button class="btn" onclick="acxClose()">Close</button></div>`);
+  }
+  window.acxAQ = v => { A.q = v; renderAudit(); };
+
+  /* =====================================================================
+     HOOKS into the existing Attendance screen (originals are preserved and called)
+     ===================================================================== */
+  const toolsCard = () => `<div class="card acx-admin"><div class="section-label" style="color:var(--seal)">Administrator · Historical Attendance &amp; Corrections</div>
+    <p class="pagesub">Import pending subject-wise records, add missed entries, and correct individual records. Every change is saved to the audit trail.</p>
+    <div class="acx-btnrow"><button class="btn btn-primary" onclick="acxOpenImport()">⬆ Import Historical Attendance</button><button class="btn" onclick="acxOpenManual()">✎ Manual Entry / Correction</button><button class="btn" onclick="acxOpenRecords()">🔎 Find &amp; Edit Records</button><button class="btn" onclick="acxOpenAudit()">📜 Audit Log</button></div></div>`;
+  if (typeof window.renderAttendanceHome === 'function') {
+    const orig = window.renderAttendanceHome;
+    window.renderAttendanceHome = function () {
+      const html = orig.apply(this, arguments);
+      try {
+        if (!isAdmin() || (typeof attState !== 'undefined' && attState)) return html;
+        const at = html.indexOf('Student Attendance Search'); const cut = at > -1 ? html.lastIndexOf('<div class="card">', at) : -1;
+        return cut > -1 ? html.slice(0, cut) + toolsCard() + html.slice(cut) : html + toolsCard();
+      } catch (e) { return html; }
+    };
+  }
+  if (typeof window.showAdminStudentAttendance === 'function') {
+    const o2 = window.showAdminStudentAttendance;
+    window.showAdminStudentAttendance = function (id) {
+      o2.apply(this, arguments);
+      try { const el = document.getElementById('adminStudentAttendanceDetail'); if (el && id && isAdmin()) el.insertAdjacentHTML('beforeend', `<div class="acx-admin acx-btnrow"><button class="btn btn-sm" onclick="acxOpenRecords('${esc(String(id)).replace(/'/g, '')}')">✎ Edit this student's records</button></div>`); } catch (e) { }
+    };
+  }
+})();
+
+</script>
+
+<script>
+/* =========================================================
+   ACADCOM — ADMIN SUBJECT DELETION (permanent, archived, synchronised with Supabase)
+   Writes ONLY through public.acadcom_delete_subject (admin-checked, one transaction).
+   Reads the globals the page declares with `let` (DB, WEEK, HISTORY, CURRENT_USER) directly.
+   ========================================================= */
+(function () {
+  'use strict';
+  if (typeof document === 'undefined') return;
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const user = () => (typeof CURRENT_USER !== 'undefined' ? CURRENT_USER : null);
+  const isAdmin = () => !!(user() && user().role === 'admin');
+  const sb = () => window.supabaseClient;
+  const say = m => { try { toast(m); } catch (e) { } };
+  const LS = 'acadcom_deleted_subject_ids';
+
+  /* ---------- tombstones: ids of subjects that must never reappear ---------- */
+  const DEL = new Set();
+  try { (JSON.parse(localStorage.getItem(LS) || '[]') || []).forEach(x => DEL.add(String(x))); } catch (e) { }
+  const persist = () => { try { localStorage.setItem(LS, JSON.stringify([...DEL])); } catch (e) { } };
+  let lastFetch = 0;
+  async function refreshTombstones(force) {
+    if (!sb() || (!force && Date.now() - lastFetch < 60000)) return;
+    lastFetch = Date.now();
+    try {
+      const { data, error } = await sb().from('deleted_subject_ids').select('subject_id');
+      if (error || !Array.isArray(data)) return;                       /* table missing / unreadable: keep local list */
+      let changed = false; data.forEach(r => { const k = String(r.subject_id); if (!DEL.has(k)) { DEL.add(k); changed = true; } });
+      if (changed) persist();
+    } catch (e) { }
+  }
+
+  /* Remove every trace of a deleted subject from in-memory state (subject list, timetable, attendance history).
+     Called before every render, so stale copies arriving from Firebase/localStorage/other tabs cannot bring it back. */
+  function purge() {
+    if (!DEL.size) return;
+    try { if (typeof DB !== 'undefined' && DB && Array.isArray(DB.subjects) && DB.subjects.some(s => DEL.has(String(s.id)))) DB.subjects = DB.subjects.filter(s => !DEL.has(String(s.id))); } catch (e) { }
+    try { if (typeof WEEK !== 'undefined' && Array.isArray(WEEK) && WEEK.some(s => DEL.has(String(s.subjectId)))) WEEK = WEEK.filter(s => !DEL.has(String(s.subjectId))); } catch (e) { }
+    try { if (typeof HISTORY !== 'undefined' && Array.isArray(HISTORY) && HISTORY.some(r => DEL.has(String(r.subjectId)))) HISTORY = HISTORY.filter(r => !DEL.has(String(r.subjectId))); } catch (e) { }
+    try { if (Array.isArray(window.SUPABASE_ATTENDANCE) && window.SUPABASE_ATTENDANCE.some(r => DEL.has(String(r.subject_id)))) window.SUPABASE_ATTENDANCE = window.SUPABASE_ATTENDANCE.filter(r => !DEL.has(String(r.subject_id))); } catch (e) { }
+  }
+  window.acxPurgeDeletedSubjects = purge;
+
+  const wrap = (name, fn) => { const o = window[name]; if (typeof o !== 'function') return; window[name] = fn(o); };
+  wrap('render', o => function () { purge(); return o.apply(this, arguments); });
+  wrap('saveWeek', o => function () { purge(); return o.apply(this, arguments); });            /* timetable publish = delete-all + re-insert from WEEK */
+  wrap('syncSupabaseAttendance', o => async function () { const r = await o.apply(this, arguments); purge(); return r; });
+  wrap('loadSupabaseSubjects', o => async function () { await refreshTombstones(false); const r = await o.apply(this, arguments); purge(); return r; });
+  refreshTombstones(true);
+
+  /* ---------- UI ---------- */
+  const css = document.createElement('style');
+  css.textContent = `.acx-delbox{padding:10px 12px;border-radius:10px;font-size:12.5px;line-height:1.45;margin:10px 0;border:1px solid rgba(201,75,75,.35);background:rgba(201,75,75,.07)}
+  .acx-delbox ul{margin:6px 0 0 18px;padding:0}.acx-delok{border-color:var(--rule);background:var(--surface)}
+  .acx-delinput{width:100%;box-sizing:border-box;border:1px solid var(--rule);border-radius:9px;padding:10px;font-size:14px;background:var(--surface);color:var(--ink);margin-top:6px}
+  .role-student .acx-delbtn{display:none!important}`;
+  document.head.appendChild(css);
+
+  const state = { busy: false, id: null };
+  const errText = e => {
+    const m = String((e && (e.message || e.details)) || e || 'Unknown error');
+    if (/forbidden|42501/i.test(m)) return 'Not allowed: only the signed-in Academic Committee administrator can delete subjects.';
+    if (/subject_not_found/.test(m)) return 'This subject no longer exists in the database. Refresh the page.';
+    if (/confirmation_mismatch/.test(m)) return 'The typed name does not match the subject name.';
+    if (/blocked_by_dependents/.test(m)) return m.replace(/^.*blocked_by_dependents:\s*/, '');
+    if (/Could not find the function|schema cache|does not exist/i.test(m)) return 'The subject-deletion database migration has not been applied yet. Run 2026-10-12b_acadcom_subject_delete.sql in Supabase first.';
+    if (/Failed to fetch|NetworkError|network/i.test(m)) return 'Network error — nothing was deleted. Check your connection and try again.';
+    return m;
+  };
+  const head = t => `<div class="mhead"><h3>${esc(t)}</h3><button class="close-x" onclick="acxDelCancel()" aria-label="Close">✕</button></div>`;
+  window.acxDelCancel = function () { if (state.busy) return; state.id = null; closeModal(); };
+
+  window.acxDeleteSubject = async function (id) {
+    if (!isAdmin()) { say('Admin access required'); return; }
+    if (state.busy) return;
+    const sub = (DB.subjects || []).find(s => String(s.id) === String(id));
+    if (!sub) { say('Subject not found — refresh and try again.'); return; }
+    if (!sb()) { say('Not connected to Supabase'); return; }
+    state.id = String(id);
+    openModal(head('Delete subject') + '<div class="acx-delbox acx-delok">Checking what this subject is linked to…</div>');
+    let imp;
+    try {
+      const { data, error } = await sb().rpc('acadcom_subject_delete_impact', { p_subject_id: String(id) });
+      if (error) throw error; imp = data;
+    } catch (e) { openModal(head('Delete subject') + `<div class="acx-delbox">${esc(errText(e))}</div><button class="btn btn-block" onclick="acxDelCancel()">Close</button>`); return; }
+    const others = (imp.other_references || []);
+    const blockers = others.filter(o => o.action === 'blocked');
+    const li = [
+      `<li><b>${imp.attendance_rows}</b> attendance record(s) in <b>${imp.attendance_sessions}</b> session(s) for <b>${imp.students_affected}</b> student(s) will be removed from the live tables. They are copied to a secure archive first.</li>`,
+      `<li><b>${imp.timetable_rows}</b> timetable entr${imp.timetable_rows === 1 ? 'y' : 'ies'} will be removed.</li>`,
+      ...others.filter(o => o.action === 'set_null').map(o => `<li><b>${o.rows}</b> row(s) in <code>${esc(o.table)}</code> will be kept but detached from this subject.</li>`),
+      `<li>The subject will no longer count towards <b>any student's overall attendance percentage</b>.</li>`
+    ].join('');
+    openModal(head('Delete subject') + `
+      <div class="acx-delbox"><b>Permanently delete “${esc(imp.subject_name)}”?</b>
+        <ul>${li}</ul></div>
+      <div class="acx-delbox acx-delok">Attendance audit history (corrections, imports) is <b>kept</b> (${imp.audit_rows_kept} entr${imp.audit_rows_kept === 1 ? 'y' : 'ies'} for this subject). This action cannot be undone from the app.</div>
+      ${blockers.length ? `<div class="acx-delbox"><b>Cannot delete yet.</b> These tables still link to the subject and cannot be detached automatically: ${blockers.map(b => `<code>${esc(b.table)}</code> (${b.rows})`).join(', ')}. Remove or reassign those records first.</div>` : ''}
+      <div class="btn-row" style="margin-top:12px"><button class="btn btn-block" onclick="acxDelCancel()">Cancel</button>
+      <button class="btn btn-danger btn-block" ${blockers.length ? 'disabled' : ''} onclick="acxDelStep2('${esc(String(id)).replace(/'/g, '')}')">Continue</button></div>`);
+  };
+
+  window.acxDelStep2 = function (id) {
+    if (!isAdmin() || state.busy) return;
+    const sub = (DB.subjects || []).find(s => String(s.id) === String(id)); if (!sub) return;
+    state.id = String(id);
+    openModal(head('Final confirmation') + `
+      <div class="acx-delbox">This is permanent. To confirm, type the subject name exactly:<br><b>${esc(sub.name)}</b>
+        <input class="acx-delinput" id="acxDelName" type="text" autocomplete="off" autocapitalize="off" placeholder="Type the subject name" oninput="acxDelCheck()"></div>
+      <div id="acxDelErr"></div>
+      <div class="btn-row" style="margin-top:12px"><button class="btn btn-block" id="acxDelBack" onclick="acxDeleteSubject('${esc(String(id)).replace(/'/g, '')}')">← Back</button>
+      <button class="btn btn-danger btn-block" id="acxDelGo" disabled onclick="acxDelRun()">Permanently delete</button></div>`);
+  };
+  window.acxDelCheck = function () {
+    const sub = (DB.subjects || []).find(s => String(s.id) === state.id); const b = document.getElementById('acxDelGo'), i = document.getElementById('acxDelName');
+    if (b && i && sub) b.disabled = state.busy || i.value.trim() !== String(sub.name).trim();
+  };
+
+  window.acxDelRun = async function () {
+    if (!isAdmin() || state.busy || !state.id) return;
+    const id = state.id, sub = (DB.subjects || []).find(s => String(s.id) === id); if (!sub) return;
+    const input = document.getElementById('acxDelName'), go = document.getElementById('acxDelGo'), back = document.getElementById('acxDelBack'), err = document.getElementById('acxDelErr');
+    if (!input || input.value.trim() !== String(sub.name).trim()) return;
+    state.busy = true; if (go) { go.disabled = true; go.textContent = 'Deleting…'; } if (back) back.disabled = true; input.disabled = true; if (err) err.innerHTML = '';
+    try {
+      const { data, error } = await sb().rpc('acadcom_delete_subject', { p_subject_id: id, p_confirm_name: input.value.trim() });
+      if (error) throw error;
+      if (!data || data.status !== 'deleted' || data.subject_rows_deleted !== 1) throw new Error('The database did not confirm the deletion.');
+      /* Backend confirmed: now make every client-side copy agree */
+      DEL.add(id); persist(); purge();
+      for (const loader of ['loadSupabaseSubjects', 'loadSupabaseTimetable', 'syncSupabaseAttendance']) { try { if (typeof window[loader] === 'function') await window[loader](); } catch (e) { console.warn(loader, e); } }
+      purge();
+      try { await saveDB(); } catch (e) { } try { await saveHistory(); } catch (e) { }   /* keep any legacy shared copy in step */
+      state.busy = false; state.id = null; closeModal();
+      try { render(); } catch (e) { console.error(e); }
+      say(`“${data.subject_name}” deleted. Attendance percentages updated.`);
+    } catch (e) {
+      state.busy = false;
+      if (err) err.innerHTML = `<div class="acx-delbox">Nothing was deleted. ${esc(errText(e))}</div>`;
+      if (go) { go.textContent = 'Permanently delete'; } if (back) back.disabled = false; if (input) { input.disabled = false; }
+      window.acxDelCheck();
+    }
+  };
+
+  /* Any lingering code path that used to "delete" a subject only locally now goes through the secure flow. */
+  window.deleteSubject = function (id) { return window.acxDeleteSubject(id); };
 })();
 
 </script>
