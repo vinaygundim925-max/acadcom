@@ -805,6 +805,7 @@ function render(){
   else if(TAB==='polls') el.innerHTML = (typeof renderPollsRoot==='function') ? renderPollsRoot() : '';
   else if(TAB==='confess') el.innerHTML = (typeof renderConfessRoot==='function') ? renderConfessRoot() : '';
   else if(TAB==='ace') el.innerHTML = (typeof renderAceRoot==='function') ? renderAceRoot() : '<div class="empty">ACADCOM ACE is loading.</div>';
+  else if(TAB==='placement') el.innerHTML = renderPlacementReadiness();
   bindScreenEvents();
 }
 function backToMoreLink(){
@@ -2962,6 +2963,11 @@ function renderAcademicDashboard(){
    <div class="acad-stat"><b>${WEEK.length}</b><span>Published Classes</span></div>
    <div class="acad-stat"><b>${role?(DB?.students?.length||0):(attendanceSummary?attendanceSummary.overall+'%':'—')}</b><span>${role?'Students':'Overall Attendance'}</span></div>
    <div class="acad-stat"><b>${DB?.subjects?.length||0}</b><span>Subjects</span></div>
+ </div>
+ <div class="pr-home-feature" role="button" tabindex="0" onclick="setTab('placement')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();setTab('placement')}">
+   <div class="pr-home-top"><span class="pr-home-icon">🎯</span><span class="pr-home-hot">🔥 TRENDING · PLACEMENT PREP</span></div>
+   <div class="pr-home-copy"><h3>Placement Readiness</h3><p>Your daily edge for placements: 1 GD topic, 1 solved guesstimate, and 10 sourced agribusiness data points.</p></div>
+   <div class="pr-home-cta">Start today's preparation <span>→</span></div>
  </div>
  <div class="section-label">Quick Access</div>
  <div class="feature-grid">
@@ -11115,6 +11121,99 @@ window.aceCreateChallenge=async function(e){e.preventDefault();if(!aceIsAdmin())
 window.aceLoadAdminChallenges=async function(){const el=document.getElementById('ace-admin');if(!el||!aceIsAdmin())return;el.innerHTML='<p class="ace-muted">Loading challenges…</p>';try{const {data,error}=await aceSb().from('daily_ace_challenges').select('id,challenge_date,title,status,submission_cutoff,reveal_at').order('challenge_date',{ascending:false}).limit(14);if(error)throw error;el.innerHTML=`<div class="ace-actions"><button class="btn btn-primary" onclick="aceShowAdminForm()">＋ Create daily challenge</button><button class="btn" onclick="openQuizPdfImport('ace')">📄 Import from PDF</button></div>${(data||[]).map(c=>`<div class="ace-rank-row"><div class="ace-rank-num">🏆</div><div><div class="ace-rank-name">${aceEsc(c.title)}</div><div class="ace-rank-meta">${aceEsc(c.challenge_date)} · ${aceEsc(c.status)}</div></div><span>${aceEsc(aceTime(c.reveal_at))}</span></div>`).join('')||'<p class="ace-muted">No challenges created yet.</p>'}`;}catch(e){el.innerHTML=`<p class="ace-muted">Could not load challenges: ${aceEsc(e.message||'Database setup required.')}</p><button class="btn" onclick="aceShowAdminForm()">Create challenge</button>`;}};
 // The router calls renderAceRoot synchronously; load data after the page is mounted.
 const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){const markup=originalRenderAce();setTimeout(aceLoad,0);return markup;};
+})();
+</script>
+
+<style id="placement-readiness-home-highlight">
+.pr-home-feature{position:relative;overflow:hidden;display:flex;flex-direction:column;gap:12px;margin:12px 0 18px;padding:18px;border-radius:18px;cursor:pointer;color:#fff;background:linear-gradient(115deg,#7c2d12 0%,#c2410c 42%,#ea580c 100%);box-shadow:0 8px 24px rgba(194,65,12,.22);border:1px solid rgba(255,255,255,.25);transition:transform .18s ease,box-shadow .18s ease}
+.pr-home-feature:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(194,65,12,.3)}
+.pr-home-feature:focus-visible{outline:3px solid #fb923c;outline-offset:3px}
+.pr-home-feature:after{content:"";position:absolute;width:170px;height:170px;border:1px solid rgba(255,255,255,.16);border-radius:50%;right:-48px;top:-76px;box-shadow:0 0 0 18px rgba(255,255,255,.04),0 0 0 38px rgba(255,255,255,.035);pointer-events:none}
+.pr-home-top{display:flex;align-items:center;justify-content:space-between;gap:10px;position:relative;z-index:1}
+.pr-home-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:rgba(255,255,255,.17);font-size:23px}
+.pr-home-hot{font-size:10px;font-weight:850;letter-spacing:.07em;padding:6px 9px;border-radius:99px;background:#fff;color:#9a3412;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.pr-home-copy{position:relative;z-index:1}.pr-home-copy h3{margin:0 0 6px;font-size:21px;color:#fff}.pr-home-copy p{margin:0;max-width:680px;font-size:12px;line-height:1.65;color:rgba(255,255,255,.92)}
+.pr-home-cta{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.25);font-size:12px;font-weight:750}.pr-home-cta span{font-size:19px}
+@media(min-width:700px){.pr-home-feature{padding:22px 24px}.pr-home-copy h3{font-size:24px}}
+@media(prefers-reduced-motion:reduce){.pr-home-feature{transition:none}}
+</style>
+
+<style id="placement-readiness-styles">
+.pr-wrap{max-width:1000px;margin:0 auto}.pr-hero{border-radius:18px;padding:20px;background:linear-gradient(135deg,#173c35,#28695b);color:#fff;margin:10px 0 14px}.pr-hero h2{margin:0 0 7px;font-size:23px}.pr-hero p{margin:0;opacity:.9;line-height:1.55}.pr-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.pr-kpi{border:1px solid var(--rule);background:var(--surface);border-radius:12px;padding:12px}.pr-kpi b{display:block;font-size:18px}.pr-kpi span{font-size:10px;color:var(--ink-soft)}.pr-card{border:1px solid var(--rule);background:var(--surface);border-radius:14px;padding:15px;margin:10px 0}.pr-card h3{margin:0 0 10px;font-size:16px}.pr-card h4{margin:13px 0 6px;font-size:12px}.pr-card p,.pr-card li{font-size:12px;line-height:1.65}.pr-card ul,.pr-card ol{padding-left:20px}.pr-tag{display:inline-block;border:1px solid var(--rule);border-radius:99px;padding:4px 8px;font-size:10px;margin-bottom:8px}.pr-source{font-size:11px;overflow-wrap:anywhere}.pr-source a{color:var(--seal)}.pr-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.pr-muted{font-size:11px;color:var(--ink-soft)}.pr-status{padding:10px;border-radius:10px;background:var(--paper-alt);font-size:12px}.pr-data-point{padding:10px 0;border-top:1px solid var(--rule)}.pr-data-point:first-child{border-top:0}.pr-error{color:#b42318}.pr-good{color:#237447}@media(max-width:540px){.pr-hero{padding:16px}.pr-hero h2{font-size:20px}.pr-kpis{grid-template-columns:1fr 1fr}.pr-card{padding:12px}}
+</style>
+<script id="acadcom-placement-readiness">
+(function(){
+  const originalMore = renderMoreMenu;
+  renderMoreMenu = function(){
+    let out = originalMore();
+    const entry = '<div class="card"><div class="list-item" onclick="setTab(\'placement\')" style="cursor:pointer"><div class="meta"><div class="name">🎯 Placement Readiness</div><div class="sub">Daily GD, solved guesstimate and agribusiness data</div></div><span>›</span></div></div>';
+    if (!out.includes("setTab('placement')")) out = out.replace('</p>', '</p>' + entry);
+    return out;
+  };
+  const escPR = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const arrPR = (v) => Array.isArray(v) ? v : [];
+  const listPR = (v) => arrPR(v).map(x => '<li>'+escPR(x)+'</li>').join('');
+  window.prRefresh = async function(){ if (typeof renderPlacementReadiness === 'function') { document.getElementById('screen').innerHTML = renderPlacementReadiness(); } };
+  window.prGenerateNow = async function(){
+    const sb = window.supabaseClient;
+    if (!sb) { toast('Supabase connection is unavailable.'); return; }
+    try {
+      const {data:{session}} = await sb.auth.getSession();
+      if (!session?.access_token) { toast('Please sign in again.'); return; }
+      const res = await fetch('/api/placement-generate', {method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},body:JSON.stringify({source:'admin_manual'})});
+      const body = await res.json().catch(()=>({}));
+      if (!res.ok || !body.ok) { toast(body.error || 'Generation did not pass validation.'); console.error('Placement generation result',body); return; }
+      toast(body.alreadyPublished ? 'Today’s pack is already published.' : 'Today’s Placement Readiness pack is published.');
+      render();
+    } catch(e) { console.error(e); toast('Could not contact the generation service.'); }
+  };
+  window.prToggleBookmark = async function(packId, currentlyBookmarked){
+    const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
+    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
+    const q=currentlyBookmarked ? sb.from('placement_bookmarks').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_bookmarks').insert({pack_id:packId,user_id:user.id});
+    const {error}=await q; if(error){console.error(error);toast('Bookmark could not be saved.');return;} render();
+  };
+  window.prToggleComplete = async function(packId, currentlyComplete){
+    const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
+    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
+    const q=currentlyComplete ? sb.from('placement_completions').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_completions').insert({pack_id:packId,user_id:user.id});
+    const {error}=await q; if(error){console.error(error);toast('Progress could not be saved.');return;} render();
+  };
+  window.renderPlacementReadiness = function(){
+    const admin = CURRENT_USER?.role === 'admin';
+    return `<div class="pr-wrap"><div class="pr-hero"><span class="pr-tag">MANAGE · PGDM-ABM</span><h2>🎯 Placement Readiness</h2><p>Build a daily placement habit with a discussion topic, one solved guesstimate, and 10 sourced agribusiness data points.</p><div class="pr-actions"><button class="btn btn-sm" onclick="setTab('more')">← More</button><button class="btn btn-sm" onclick="render()">Refresh</button>${admin?'<button class="btn btn-primary btn-sm" onclick="prGenerateNow()">Generate / publish today</button>':''}</div></div><div id="pr-content"><div class="pr-status">Loading today’s preparation pack…</div></div></div>`;
+  };
+  const baseRender = render;
+  render = function(){
+    if (TAB === 'placement') {
+      if (!READY) return;
+      const el=document.getElementById('screen');
+      el.innerHTML=renderPlacementReadiness(); bindScreenEvents();
+      loadPlacementReadiness();
+      return;
+    }
+    return baseRender();
+  };
+  async function loadPlacementReadiness(){
+    const host=document.getElementById('pr-content'); if(!host)return;
+    const sb=window.supabaseClient;
+    if(!sb){host.innerHTML='<div class="pr-status pr-error">Supabase is not connected.</div>';return;}
+    try{
+      const {data:{user}}=await sb.auth.getUser();
+      if(!user){host.innerHTML='<div class="pr-status">Please sign in again to view your preparation pack.</div>';return;}
+      const [{data:packs,error:packErr},{data:bookmarks,error:bmErr},{data:done,error:doneErr}]=await Promise.all([
+        sb.from('placement_daily_packs').select('*').eq('status','published').order('content_date',{ascending:false}).limit(14),
+        sb.from('placement_bookmarks').select('pack_id').eq('user_id',user.id),
+        sb.from('placement_completions').select('pack_id').eq('user_id',user.id)
+      ]);
+      if(packErr)throw packErr; if(bmErr)throw bmErr; if(doneErr)throw doneErr;
+      if(!packs?.length){host.innerHTML='<div class="pr-card"><h3>No published pack yet</h3><p>The daily generator has not published a validated pack yet.</p>'+(CURRENT_USER?.role==='admin'?'<p class="pr-muted">Admin: use “Generate / publish today” after the server secrets are configured.</p>':'')+'</div>';return;}
+      const bm=new Set((bookmarks||[]).map(x=>x.pack_id)), dn=new Set((done||[]).map(x=>x.pack_id));
+      const latest=packs[0], gd=latest.gd_topic||{}, g=latest.guesstimate||{}, points=Array.isArray(latest.data_points)?latest.data_points:[];
+      const renderPack=(pack)=>{const isLatest=pack.id===latest.id;return `<div class="pr-card"><span class="pr-tag">${escPR(pack.content_date)} · ${isLatest?'Latest pack':'Archive'}</span><h3>${escPR(pack.gd_topic?.title||'Placement practice')}</h3><p>${escPR(pack.gd_topic?.context||'')}</p><div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${pack.id}',${bm.has(pack.id)})">${bm.has(pack.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${pack.id}',${dn.has(pack.id)})">${dn.has(pack.id)?'✓ Completed':'Mark complete'}</button></div>${isLatest?`<h4>1. Group Discussion</h4><b>45–60 second opening</b><p>${escPR(gd.opening_statement)}</p><h4>Arguments supporting</h4><ul>${listPR(gd.arguments_for)}</ul><h4>Counterarguments</h4><ul>${listPR(gd.arguments_against)}</ul><h4>Practical solutions</h4><ul>${listPR(gd.solutions)}</ul><h4>Conclusion</h4><p>${escPR(gd.conclusion)}</p><h4>Likely follow-up questions</h4><ul>${listPR(gd.follow_up_questions)}</ul><h4>2. Solved guesstimate</h4><b>${escPR(g.question)}</b><p><b>Approach:</b> ${escPR(g.approach)}</p><b>Assumptions</b><ul>${listPR(g.assumptions)}</ul><b>Calculation</b><ol>${listPR(g.calculation_steps)}</ol><p><b>Estimate:</b> ${escPR(g.final_estimate)}</p><p><b>Sanity check:</b> ${escPR(g.sanity_check)}</p><p><b>Interview-ready explanation:</b> ${escPR(g.interview_explanation)}</p><h4>3. Agribusiness data points (10)</h4>${points.map((d,i)=>`<div class="pr-data-point"><b>${i+1}. ${escPR(d.label)}</b><p><b>${escPR(d.figure)} ${escPR(d.unit)}</b> · ${escPR(d.year)}</p><p>${escPR(d.context)}</p><p><b>Placement relevance:</b> ${escPR(d.placement_relevance)}</p><div class="pr-source">Source: <a href="${escPR(d.source_url)}" target="_blank" rel="noopener noreferrer">${escPR(d.source_title||d.source_url)}</a></div></div>`).join('')}<p class="pr-muted">Automated validation checks structure and source-link responses. Always check the linked report before quoting a statistic in an interview.</p>`:`<p class="pr-muted">Open the latest pack for full details. Older packs are retained for history and revision.</p>`}</div>`;};
+      host.innerHTML='<div class="pr-kpis"><div class="pr-kpi"><b>'+packs.length+'</b><span>Recent daily packs</span></div><div class="pr-kpi"><b>'+dn.size+'</b><span>Completed</span></div><div class="pr-kpi"><b>'+bm.size+'</b><span>Bookmarked</span></div></div>'+renderPack(latest)+(packs.length>1?'<h3 class="pagetitle">Previous days</h3>'+packs.slice(1).map(renderPack).join(''):'');
+    }catch(e){console.error('Placement Readiness load failed',e);host.innerHTML='<div class="pr-status pr-error">Could not load Placement Readiness. Check the placement table policies and Supabase connection.</div>';}
+  }
 })();
 </script>
 
