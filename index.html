@@ -11174,18 +11174,33 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
   const escPR = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const arrPR = (v) => Array.isArray(v) ? v : [];
   const listPR = (v) => arrPR(v).map(x => '<li>'+escPR(x)+'</li>').join('');
+  // Imported topic-bank resources cannot use placement_bookmarks/placement_completions,
+  // because those tables are intentionally foreign-keyed to placement_daily_packs.
+  // Keep manual-resource progress local to this browser and scoped to the signed-in user.
+  function prLocalProgressKey(kind,userId){return 'acadcom:placement:'+kind+':'+String(userId||'guest');}
+  function prReadLocalProgress(kind,userId){try{const v=JSON.parse(localStorage.getItem(prLocalProgressKey(kind,userId))||'[]');return new Set(Array.isArray(v)?v:[]);}catch(_){return new Set();}}
+  function prWriteLocalProgress(kind,userId,set){try{localStorage.setItem(prLocalProgressKey(kind,userId),JSON.stringify([...set]));return true;}catch(_){return false;}}
+  window.prToggleManualBookmark=function(topicId,currentlyBookmarked){return prToggleLocalResourceProgress('bookmarks',topicId,currentlyBookmarked,'Bookmark');};
+  window.prToggleManualComplete=function(topicId,currentlyComplete){return prToggleLocalResourceProgress('completed',topicId,currentlyComplete,'Progress');};
+  async function prToggleLocalResourceProgress(kind,topicId,current,label){
+    const sb=window.supabaseClient;if(!sb){toast('Supabase connection unavailable.');return;}
+    const {data:{user},error}=await sb.auth.getUser();if(error||!user){toast('Please sign in again.');return;}
+    const set=prReadLocalProgress(kind,user.id);if(current)set.delete(topicId);else set.add(topicId);
+    if(!prWriteLocalProgress(kind,user.id,set)){toast(label+' could not be saved in this browser.');return;}
+    loadPlacementReadiness();
+  }
   window.prRefresh = async function(){ if (typeof renderPlacementReadiness === 'function') { document.getElementById('screen').innerHTML = renderPlacementReadiness(); } };
   window.prToggleBookmark = async function(packId, currentlyBookmarked){
     const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
-    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
+    const {data:{user},error:authError}=await sb.auth.getUser(); if(authError||!user){toast('Please sign in again.');return;}
     const q=currentlyBookmarked ? sb.from('placement_bookmarks').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_bookmarks').insert({pack_id:packId,user_id:user.id});
-    const {error}=await q; if(error){console.error(error);toast('Bookmark could not be saved.');return;} render();
+    const {error}=await q; if(error){console.error(error);toast('Bookmark could not be saved.');return;} loadPlacementReadiness();
   };
   window.prToggleComplete = async function(packId, currentlyComplete){
     const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
-    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
+    const {data:{user},error:authError}=await sb.auth.getUser(); if(authError||!user){toast('Please sign in again.');return;}
     const q=currentlyComplete ? sb.from('placement_completions').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_completions').insert({pack_id:packId,user_id:user.id});
-    const {error}=await q; if(error){console.error(error);toast('Progress could not be saved.');return;} render();
+    const {error}=await q; if(error){console.error(error);toast('Progress could not be saved.');return;} loadPlacementReadiness();
   };
   window.prActiveTab = window.prActiveTab || 'gd';
   window.renderPlacementReadiness = function(){
@@ -11278,18 +11293,6 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
     }catch(e){console.error('Placement PDF publish failed:',e);toast('Could not publish PDF: '+(e.message||'Check Supabase policies.'));}
     finally{if(btn){btn.disabled=false;btn.textContent='Save and publish';}}
   };
-  window.prToggleBookmark = async function(packId, currentlyBookmarked){
-    const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
-    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
-    const q=currentlyBookmarked ? sb.from('placement_bookmarks').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_bookmarks').insert({pack_id:packId,user_id:user.id});
-    const {error}=await q; if(error){console.error(error);toast('Bookmark could not be saved.');return;} render();
-  };
-  window.prToggleComplete = async function(packId, currentlyComplete){
-    const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
-    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
-    const q=currentlyComplete ? sb.from('placement_completions').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_completions').insert({pack_id:packId,user_id:user.id});
-    const {error}=await q; if(error){console.error(error);toast('Progress could not be saved.');return;} render();
-  };
   const baseRender = render;
   render = function(){
     if (TAB === 'placement') {
@@ -11325,8 +11328,9 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
       ]);
       if(packErr)throw packErr;if(bmErr)throw bmErr;if(doneErr)throw doneErr;if(topicErr)throw topicErr;
       const bm=new Set((bookmarks||[]).map(x=>x.pack_id)), dn=new Set((done||[]).map(x=>x.pack_id));
+      const manualBm=prReadLocalProgress('bookmarks',user.id), manualDn=prReadLocalProgress('completed',user.id);
       const latest=(packs||[]).find(p=>p.status==='published')||null;
-      const manual=(topics||[]).filter(t=>t.details?.manual_import===true && t.details?.published!==false);
+      const manual=(topics||[]).filter(t=>t.details?.manual_import===true && t.details?.published===true);
       const tab=window.prActiveTab||'gd';
       const tabMeta={
         gd:{num:'01',label:'Group Discussion',short:'GD',desc:'Build a clear opening, balanced arguments and a solution-led conclusion.',type:'gd'},
@@ -11335,16 +11339,17 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
       };
       const meta=tabMeta[tab]||tabMeta.gd;
       const tabs=`<nav class="pr-tabs" aria-label="Placement preparation sections">${Object.keys(tabMeta).map(k=>`<button class="pr-tab ${tab===k?'active':''}" aria-pressed="${tab===k}" onclick="prSwitchTab('${k}')"><span class="pr-tab-num">${tabMeta[k].num}</span><span>${tabMeta[k].label}</span></button>`).join('')}</nav>`;
-      const kpis=`<div class="pr-kpis"><div class="pr-kpi"><b>${manual.length}</b><span>Manual resources published</span></div><div class="pr-kpi"><b>${latest?'1':'0'}</b><span>Published daily pack</span></div><div class="pr-kpi"><b>${dn.size}</b><span>Completed packs</span></div></div>`;
+      const kpis=`<div class="pr-kpis"><div class="pr-kpi"><b>${manual.length}</b><span>Manual resources published</span></div><div class="pr-kpi"><b>${latest?'1':'0'}</b><span>Published daily pack</span></div><div class="pr-kpi"><b>${dn.size+manualDn.size}</b><span>Completed items</span></div></div>`;
       const resources=manual.filter(t=>t.details?.content_type===tab);
-      const resourceCards=resources.map((t,i)=>`<article class="pr-card"><span class="pr-tag">📄 ${escPR(t.source_deck||'Imported PDF')}</span><h3>${escPR(t.topic)}</h3><p class="pr-muted">Published ${escPR(new Date(t.created_at).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}))}</p><div class="pr-resource-text">${prFormatText(t.details?.content_text)}</div>${CURRENT_USER?.role==='admin'?`<div class="pr-actions"><button class="btn btn-sm" onclick="prDeleteResource('${t.id}')">Delete resource</button></div>`:''}</article>`).join('');
+      const resourceCards=resources.map((t,i)=>`<article class="pr-card"><span class="pr-tag">📄 ${escPR(t.source_deck||'Imported PDF')}</span><h3>${escPR(t.topic)}</h3><p class="pr-muted">Published ${escPR(new Date(t.created_at).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}))}</p><div class="pr-resource-text">${prFormatText(t.details?.content_text)}</div><div class="pr-actions"><button class="btn btn-sm" onclick="prToggleManualBookmark('${t.id}',${manualBm.has(t.id)})">${manualBm.has(t.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleManualComplete('${t.id}',${manualDn.has(t.id)})">${manualDn.has(t.id)?'✓ Completed':'Mark complete'}</button>${CURRENT_USER?.role==='admin'?`<button class="btn btn-sm" onclick="prDeleteResource('${t.id}')">Delete resource</button>`:''}</div><p class="pr-muted">Bookmark and completion status are saved in this browser for your signed-in account.</p></article>`).join('');
       let featured='';
       if(tab==='gd'&&latest){
         const d=latest.gd_topic||{};
         const points=[...(d.arguments_for||[]).slice(0,2),...(d.solutions||[]).slice(0,2)];
         const pillsHtml=['Farmer economics','Evidence & efficacy','Adoption','Scalable solutions'].map(x=>'<span class="pr-pill">'+x+'</span>').join('');
         const followupsHtml=(d.follow_up_questions||[]).length?'<h4>Likely follow-up questions</h4><ul>'+listPR(d.follow_up_questions)+'</ul>':'';
-        const takeawaysHtml=takeawaysHtml;
+        const takeawayItems=arrPR(d.key_takeaways).length?arrPR(d.key_takeaways):points;
+        const takeawaysHtml=prTakeaway(takeawayItems);
         featured=`<div class="pr-layout"><div><article class="pr-card"><span class="pr-tag">✦ FEATURED DISCUSSION</span><h3>${escPR(d.title||'Group Discussion Topic')}</h3><p class="pr-lead">${escPR(d.context||'Use this topic to practise a structured, evidence-led discussion.')}</p><div class="pr-pill-row">${pillsHtml}</div><h4>Opening statement</h4><div class="pr-highlight">${prFormatText(d.opening_statement)}</div><h4>Arguments to use</h4><div class="pr-step"><div class="pr-step-num">A</div><div><h4>Supporting view</h4><ul>${listPR(d.arguments_for)}</ul></div></div><div class="pr-step"><div class="pr-step-num">B</div><div><h4>Counterarguments</h4><ul>${listPR(d.arguments_against)}</ul></div></div><h4>Solution framework</h4><ul>${listPR(d.solutions)}</ul><h4>Conclusion to land</h4><div class="pr-highlight">${prFormatText(d.conclusion)}</div>${followupsHtml}<div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${latest.id}',${bm.has(latest.id)})">${bm.has(latest.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${latest.id}',${dn.has(latest.id)})">${dn.has(latest.id)?'✓ Completed':'Mark complete'}</button></div></article></div><aside><div class="pr-side-card"><h4>Key takeaways</h4>${takeawaysHtml}</div><div class="pr-card"><span class="pr-tag">⚡ 2-MINUTE REVISION</span><h3>Before you speak</h3><div class="pr-step"><div class="pr-step-num">1</div><div><h4>Define the debate</h4><p>Frame the issue in one balanced sentence.</p></div></div><div class="pr-step"><div class="pr-step-num">2</div><div><h4>Support with evidence</h4><p>Use a concrete example or reliable statistic.</p></div></div><div class="pr-step"><div class="pr-step-num">3</div><div><h4>Offer a solution</h4><p>Connect commercial viability with farmer outcomes.</p></div></div></div></aside></div>`;
       } else if(tab==='guesstimate'&&latest){
         const g=latest.guesstimate||{};
