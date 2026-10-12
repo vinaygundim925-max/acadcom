@@ -4,7 +4,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "https://opezknjjjlavlrzemzgo.s
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const CRON_SECRET = process.env.CRON_SECRET;
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.8-flash";
 
 const json = (res, status, body) =>
   res.status(status).setHeader("Content-Type", "application/json").json(body);
