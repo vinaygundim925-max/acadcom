@@ -1,8 +1,2 @@
-{
-  "crons": [
-    {
-      "path": "/api/placement-generate",
-      "schedule": "30 1 * * *"
-    }
-  ]
-}
+
+{}
