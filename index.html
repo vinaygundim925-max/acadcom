@@ -13276,10 +13276,10 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
       var rows=[];
       MINE={};AUTH={};
       if(isAdmin()){
-        /* Admin gets metadata only: never request confession body or author identity. */
-        var q=await c.rpc('admin_confession_moderation_queue');
-        if(q.error){state='error';err='Anonymous moderation is not available yet. Please verify the Supabase moderation functions.';return;}
-        rows=(q.data||[]).map(function(p){return {id:p.post_id,body:'[Message content hidden for privacy]',tone:p.tone,is_hidden:p.is_hidden,created_at:p.posted_at};}).reverse();
+        /* Admin can read message text for moderation, but never request sender name or roll number. */
+        var r=await c.from('confession_posts').select('id,body,tone,is_hidden,created_at').order('created_at',{ascending:false}).limit(150);
+        if(r.error){state='error';err=r.error.message||'Could not load confession messages.';return;}
+        rows=(r.data||[]).slice().reverse();
       }else{
         var r=await c.from('confession_posts').select('id,body,tone,is_hidden,created_at').order('created_at',{ascending:false}).limit(150);
         if(r.error){var m=(r.error.message||'')+(r.error.code||'');state=/42P01|does not exist|schema cache|Could not find the table/i.test(m)?'setup':'error';err=r.error.message||'';return;}
@@ -13314,7 +13314,7 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
     var h='<div class="cf-msg tone-'+((p.tone|0)%6)+(mine?' mine':'')+(p.is_hidden?' is-hidden':'')+'" data-id="'+E(p.id)+'">'+
       '<div class="cf-av">'+ic('eye-off')+'</div><div class="cf-bubble">'+
       '<div class="cf-meta"><b>'+(mine?'You':'Anonymous')+'</b><span>'+timeLabel(p.created_at)+'</span>'+(p.is_hidden?'<em class="cf-tag">Hidden from students</em>':'')+'</div>'+
-      '<div class="cf-body">'+(ad?'Message content is hidden from administrators to protect anonymity.':E(p.body))+'</div>';
+      '<div class="cf-body">'+E(p.body)+'</div>';
     if(ad){
       h+='<div class="cf-admin"><span class="cf-who">'+ic('shield')+'<b>Anonymous moderation</b></span>'+
          '<span class="cf-acts"><button type="button" class="cf-link" onclick="uxConfHide(\''+E(p.id)+'\','+(p.is_hidden?'false':'true')+')">'+(p.is_hidden?'Unhide':'Hide')+'</button>'+
@@ -13352,7 +13352,7 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
     if(state==='setup')return head+setupCard();
     if(state==='error')return head+'<div class="empty">Could not open the room. '+E(err)+'<br><button type="button" class="btn btn-sm" onclick="uxConfRetry()">Try again</button></div>';
     var note=ad
-      ? '<div class="cf-note">'+ic('shield')+'<span>Admins can moderate posts without seeing message content or sender identity. <b id="cfCount2">'+POSTS.length+' messages</b></span></div>'
+      ? '<div class="cf-note">'+ic('shield')+'<span>Admins can read message text for moderation, but sender name and roll number are hidden. <b id="cfCount2">'+POSTS.length+' messages</b></span></div>'
       : '<div class="cf-note">'+ic('shield')+'<span><b>Anonymous to other students.</b> Be kind and respectful. The Academic Committee can identify a post only if it breaks the community rules.</span></div>';
     var body='<div class="cf-wrap">'+head+note+'<div id="cfFeed" class="cf-feed">'+(state==='ready'?feedHTML():'<div class="empty ux-loading">Opening the room\u2026</div>')+'</div>';
     if(!ad){
