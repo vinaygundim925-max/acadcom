@@ -323,6 +323,28 @@ return this.parent.children[i-1]},XMLNode.prototype.next=function(){var i;if(i=t
 
   });
 </script>
+
+<style id="acadcom-attendance-readable-pills">
+/* Compact, readable attendance metadata pills; status pill remains unchanged. */
+.att-date-row{align-items:center!important;gap:9px!important;padding:14px 0!important}
+.att-date-main{align-items:flex-start!important;gap:7px!important;min-width:0!important}
+.att-date-chip{display:inline-flex!important;align-items:center!important;padding:3px 0!important;
+  font-size:15px!important;font-weight:800!important;line-height:1.25!important;color:var(--ink,#172033)!important}
+.att-meta-pills{display:flex!important;flex-wrap:wrap!important;align-items:center!important;gap:5px!important}
+.att-time-chip,.att-session-chip{display:inline-flex!important;align-items:center!important;gap:4px!important;
+  padding:4px 7px!important;border-radius:7px!important;font-size:10px!important;font-weight:800!important;
+  line-height:1.25!important;white-space:normal!important}
+.att-time-chip{background:#e7efff!important;color:#244c91!important}
+.att-session-chip{background:#eee7ff!important;color:#5a369a!important;letter-spacing:.02em!important}
+.att-status{flex-shrink:0!important}
+@media(max-width:520px){
+ .att-date-row{gap:7px!important;align-items:center!important}
+ .att-date-chip{font-size:14px!important}
+ .att-time-chip,.att-session-chip{font-size:9.5px!important;padding:4px 6px!important}
+ .att-status{font-size:10px!important;padding:7px 8px!important}
+}
+</style>
+
 </head>
 <body data-theme="light">
 <div id="uxIntro" role="presentation" aria-label="MANAGE Academic Committee intro">
@@ -6434,114 +6456,64 @@ async function loadSupabaseResources() {
    ========================================================= */
 
 function renderAcademicResources() {
-
-  const resources = window.SUPABASE_RESOURCES || [];
+  const resources = Array.isArray(window.SUPABASE_RESOURCES) ? window.SUPABASE_RESOURCES : [];
   const isAdmin = CURRENT_USER?.role === 'admin';
+  const subjects = (DB?.subjects || [])
+    .filter(s => s && s.is_active !== false && s.status !== 'completed' && s.status !== 'inactive')
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+  const selectedId = window.ACADCOM_RESOURCE_SUBJECT_VIEW;
+  const escId = value => String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
-  return `
-    <p class="pagesub">
-      <a class="link-btn" onclick="setAcademicView('dashboard')">
-        ← Dashboard
-      </a>
-    </p>
-
-    <h2 class="pagetitle">📚 Resource Vault</h2>
-
-    <p class="pagesub">
-      Academic resources published by the Academic Committee.
-    </p>
-
-    ${
-      isAdmin
-        ? `
-          <button
-            class="btn btn-primary"
-            onclick="openResourceForm()">
-            ＋ Add Resource
-          </button>
-        `
-        : ''
+  if (selectedId !== undefined && selectedId !== null && selectedId !== '__general__') {
+    const subject = subjects.find(s => String(s.id) === String(selectedId));
+    if (!subject) window.ACADCOM_RESOURCE_SUBJECT_VIEW = null;
+    else {
+      const rows = resources.filter(r => String(r.subject_id ?? '') === String(subject.id));
+      return `
+        <p class="pagesub"><a class="link-btn" onclick="setAcademicView('dashboard')">← Dashboard</a></p>
+        <div class="rvault-breadcrumb"><button class="rvault-back" onclick="openResourceSubject(null)">← All subject folders</button><span>Resources Vault</span></div>
+        <section class="rvault-folder-hero"><div class="rvault-folder-icon">📂</div><div class="rvault-folder-copy"><span class="rvault-eyebrow">SUBJECT RESOURCES</span><h2>${esc(subject.name || 'Subject')}</h2><p>Notes, presentations and study material organised for this subject.</p></div><span class="rvault-count">${rows.length} ${rows.length === 1 ? 'resource' : 'resources'}</span></section>
+        ${isAdmin ? `<button class="btn btn-primary" onclick="openResourceForm('${escId(subject.id)}')">＋ Add to ${esc(subject.name || 'subject')}</button>` : ''}
+        <div class="rvault-resource-list card" style="margin-top:12px">
+          ${rows.length ? rows.map(r => `<div class="resource-item rvault-resource-item"><div class="resource-icon">${esc(r.resource_type || '📄')}</div><div class="row-main"><b>${esc(r.title || 'Untitled Resource')}</b><span>${esc(r.description || '')}${r.created_at ? ' · '+esc(new Date(r.created_at).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'})) : ''}</span></div>${r.file_url ? `<button class="icon-btn" aria-label="Open ${esc(r.title || 'resource')}" onclick="openSupabaseResource('${escId(r.id)}')">↗</button>` : ''}${isAdmin ? `<button class="icon-btn" aria-label="Delete ${esc(r.title || 'resource')}" onclick="deleteSupabaseResource('${escId(r.id)}')">🗑</button>` : ''}</div>`).join('') : `<div class="rvault-empty"><div class="rvault-empty-icon">📄</div><h3>No resources uploaded yet</h3><p>${isAdmin ? 'Add the first notes or study file for this subject.' : 'Your subject notes and published study materials will appear here.'}</p>${isAdmin ? `<button class="btn btn-primary" onclick="openResourceForm('${escId(subject.id)}')">＋ Add first resource</button>` : ''}</div>`}
+        </div>`;
     }
+  }
 
-    <div class="card" style="margin-top:10px">
-
-      ${
-        resources.length
-          ? resources.map((r) => {
-
-              const subject =
-                (DB?.subjects || []).find(
-                  s => String(s.id) === String(r.subject_id)
-                );
-
-              return `
-                <div class="resource-item">
-
-                  <div class="resource-icon">
-                    ${esc(r.resource_type || '📄')}
-                  </div>
-
-                  <div class="row-main">
-
-                    <b>${esc(r.title || 'Untitled Resource')}</b>
-
-                    <span>
-                      ${esc(r.description || '')}
-                      ${
-                        subject
-                          ? ` · ${esc(subject.name)}`
-                          : ''
-                      }
-                    </span>
-
-                  </div>
-
-                  ${
-                    r.file_url
-                      ? `
-                        <button
-                          class="icon-btn"
-                          onclick="openSupabaseResource('${r.id}')">
-                          ↗
-                        </button>
-                      `
-                      : ''
-                  }
-
-                  ${
-                    isAdmin
-                      ? `
-                        <button
-                          class="icon-btn"
-                          onclick="deleteSupabaseResource('${r.id}')">
-                          🗑
-                        </button>
-                      `
-                      : ''
-                  }
-
-                </div>
-              `;
-
-            }).join('')
-
-          : `
-            <div class="empty">
-              No academic resources have been published yet.
-            </div>
-          `
-      }
-
-    </div>
+  const folderCards = subjects.map(subject => {
+    const count = resources.filter(r => String(r.subject_id ?? '') === String(subject.id)).length;
+    return `<button type="button" class="rvault-folder-card" onclick="openResourceSubject('${escId(subject.id)}')"><span class="rvault-folder-art">📁</span><span class="rvault-folder-text"><b>${esc(subject.name || 'Untitled subject')}</b><small>${subject.code ? esc(subject.code)+' · ' : ''}${count} ${count === 1 ? 'resource' : 'resources'}</small></span><span class="rvault-folder-arrow">›</span></button>`;
+  }).join('');
+  const generalResources = resources.filter(r => !r.subject_id || !subjects.some(s => String(s.id) === String(r.subject_id)));
+  return `
+    <p class="pagesub"><a class="link-btn" onclick="setAcademicView('dashboard')">← Dashboard</a></p>
+    <h2 class="pagetitle">📚 Resources Vault</h2>
+    <p class="pagesub">Every subject has its own space. Open a folder to find the right notes, slides and study material without searching through everything.</p>
+    <div class="rvault-topline"><div><span class="rvault-eyebrow">YOUR STUDY LIBRARY</span><h3>Browse by subject</h3><p>${subjects.length} active ${subjects.length === 1 ? 'subject' : 'subjects'} · Separate resources, easier revision.</p></div>${isAdmin ? `<button class="btn btn-primary" onclick="openResourceForm()">＋ Add Resource</button>` : ''}</div>
+    <div class="rvault-folder-grid">${folderCards || '<div class="rvault-empty"><h3>No active subjects found</h3><p>Active subjects will appear here automatically when available.</p></div>'}</div>
+    ${generalResources.length ? `<div class="rvault-general-wrap"><button type="button" class="rvault-general-folder" onclick="openResourceSubject('__general__')"><span>📂</span><span><b>General / Unassigned Resources</b><small>${generalResources.length} existing resource${generalResources.length === 1 ? '' : 's'} not linked to an active subject</small></span><span>›</span></button></div>` : ''}
   `;
 }
 
+window.ACADCOM_RESOURCE_SUBJECT_VIEW = window.ACADCOM_RESOURCE_SUBJECT_VIEW ?? null;
+window.openResourceSubject = function(subjectId) {
+  window.ACADCOM_RESOURCE_SUBJECT_VIEW = subjectId === undefined || subjectId === null || subjectId === '' ? null : subjectId;
+  if (subjectId === '__general__') {
+    const resources = Array.isArray(window.SUPABASE_RESOURCES) ? window.SUPABASE_RESOURCES : [];
+    const isAdmin = CURRENT_USER?.role === 'admin';
+    const rows = resources.filter(r => !r.subject_id || !(DB?.subjects || []).some(s => s.is_active !== false && String(s.id) === String(r.subject_id)));
+    const escId = value => String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    document.getElementById('screen').innerHTML = `<p class="pagesub"><a class="link-btn" onclick="setAcademicView('dashboard')">← Dashboard</a></p><button class="rvault-back" onclick="openResourceSubject(null)">← All subject folders</button><h2 class="pagetitle">📂 General / Unassigned Resources</h2><div class="card rvault-resource-list">${rows.length ? rows.map(r=>`<div class="resource-item"><div class="resource-icon">${esc(r.resource_type||'📄')}</div><div class="row-main"><b>${esc(r.title||'Untitled Resource')}</b><span>${esc(r.description||'')}</span></div>${r.file_url?`<button class="icon-btn" onclick="openSupabaseResource('${escId(r.id)}')">↗</button>`:''}${isAdmin?`<button class="icon-btn" onclick="deleteSupabaseResource('${escId(r.id)}')">🗑</button>`:''}</div>`).join(''):'<div class="empty">No general resources.</div>'}</div>`;
+    return;
+  }
+  render();
+};
 
 /* =========================================================
    ADD RESOURCE FORM
    ========================================================= */
 
-function openResourceForm() {
+function openResourceForm(preselectSubjectId = (window.ACADCOM_RESOURCE_SUBJECT_VIEW || '')) {
 
   if (CURRENT_USER?.role !== 'admin') {
     toast('Admin access required.');
@@ -6592,7 +6564,7 @@ function openResourceForm() {
 
       ${
         subjects.map(s => `
-          <option value="${s.id}">
+          <option value="${s.id}" ${String(preselectSubjectId) === String(s.id) ? 'selected' : ''}>
             ${esc(s.name)} ${s.code ? `(${esc(s.code)})` : ''}
           </option>
         `).join('')
@@ -10966,8 +10938,11 @@ window.QPI_CORE={parseText:parseText, parseLines:parseLines, validateQ:validateQ
         ${records.length ? records.map(({r,present})=>`
           <div class="att-date-row">
             <div class="att-date-main">
-              <b>📅 ${esc(prettyAttendanceDate(r))}</b>
-              <span>${esc(r.timeText || 'Class')} ${r.sessionLabel ? '· '+esc(r.sessionLabel) : ''}</span>
+              <b class="att-date-chip">📅 ${esc(prettyAttendanceDate(r))}</b>
+              <div class="att-meta-pills">
+                <span class="att-time-chip">◷ ${esc(r.timeText || 'Time not specified')}</span>
+                ${r.sessionLabel ? `<span class="att-session-chip">SESSION ${esc(r.sessionLabel)}</span>` : ''}
+              </div>
             </div>
             <span class="att-status ${present?'present':'absent'}">${present?'✓ PRESENT':'✕ ABSENT'}</span>
           </div>
@@ -11125,15 +11100,16 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
 </script>
 
 <style id="placement-readiness-home-highlight">
-.pr-home-feature{position:relative;overflow:hidden;display:flex;flex-direction:column;gap:12px;margin:12px 0 18px;padding:18px;border-radius:18px;cursor:pointer;color:#fff;background:linear-gradient(115deg,#7c2d12 0%,#c2410c 42%,#ea580c 100%);box-shadow:0 8px 24px rgba(194,65,12,.22);border:1px solid rgba(255,255,255,.25);transition:transform .18s ease,box-shadow .18s ease}
-.pr-home-feature:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(194,65,12,.3)}
-.pr-home-feature:focus-visible{outline:3px solid #fb923c;outline-offset:3px}
-.pr-home-feature:after{content:"";position:absolute;width:170px;height:170px;border:1px solid rgba(255,255,255,.16);border-radius:50%;right:-48px;top:-76px;box-shadow:0 0 0 18px rgba(255,255,255,.04),0 0 0 38px rgba(255,255,255,.035);pointer-events:none}
+/* Home-tab Placement Readiness card: warm orange-red gradient matching the supplied reference. */
+.pr-home-feature{position:relative;overflow:hidden;display:flex;flex-direction:column;gap:12px;margin:12px 0 18px;padding:18px;border-radius:22px;cursor:pointer;color:#fff;background:radial-gradient(circle at 88% 0%,rgba(255,190,55,.28),transparent 31%),radial-gradient(circle at 5% 100%,rgba(255,120,0,.20),transparent 38%),linear-gradient(115deg,#a92b00 0%,#f04400 56%,#ff4b00 100%);box-shadow:0 12px 30px rgba(211,61,0,.23);border:1px solid rgba(255,255,255,.22);transition:transform .18s ease,box-shadow .18s ease}
+.pr-home-feature:hover{transform:translateY(-2px);box-shadow:0 15px 34px rgba(211,61,0,.30)}
+.pr-home-feature:focus-visible{outline:3px solid #ffb36b;outline-offset:3px}
+.pr-home-feature:after{content:"";position:absolute;width:170px;height:170px;border:1px solid rgba(255,255,255,.17);border-radius:50%;right:-48px;top:-76px;box-shadow:0 0 0 18px rgba(255,255,255,.045),0 0 0 38px rgba(255,255,255,.035);pointer-events:none}
 .pr-home-top{display:flex;align-items:center;justify-content:space-between;gap:10px;position:relative;z-index:1}
-.pr-home-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:rgba(255,255,255,.17);font-size:23px}
-.pr-home-hot{font-size:10px;font-weight:850;letter-spacing:.07em;padding:6px 9px;border-radius:99px;background:#fff;color:#9a3412;box-shadow:0 2px 8px rgba(0,0,0,.12)}
-.pr-home-copy{position:relative;z-index:1}.pr-home-copy h3{margin:0 0 6px;font-size:21px;color:#fff}.pr-home-copy p{margin:0;max-width:680px;font-size:12px;line-height:1.65;color:rgba(255,255,255,.92)}
-.pr-home-cta{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.25);font-size:12px;font-weight:750}.pr-home-cta span{font-size:19px}
+.pr-home-icon{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:rgba(255,255,255,.18);font-size:23px}
+.pr-home-hot{font-size:10px;font-weight:850;letter-spacing:.07em;padding:6px 9px;border-radius:99px;background:#fff;color:#96300b;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.pr-home-copy{position:relative;z-index:1}.pr-home-copy h3{margin:0 0 6px;font-size:21px;color:#fff}.pr-home-copy p{margin:0;max-width:680px;font-size:12px;line-height:1.65;color:rgba(255,255,255,.94)}
+.pr-home-cta{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.28);font-size:12px;font-weight:750;color:#fff}.pr-home-cta span{font-size:19px}
 @media(min-width:700px){.pr-home-feature{padding:22px 24px}.pr-home-copy h3{font-size:24px}}
 @media(prefers-reduced-motion:reduce){.pr-home-feature{transition:none}}
 </style>
@@ -11159,82 +11135,44 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
 .pr-data-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.pr-data-card{position:relative;border:1px solid var(--rule);border-radius:16px;padding:16px;background:var(--surface);box-shadow:0 5px 18px rgba(15,23,42,.035);overflow:hidden}.pr-data-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(#2d986b,#b6e6ca)}.pr-data-index{font-size:10px;color:var(--ink-soft);font-weight:900;letter-spacing:.1em}.pr-data-card h4{font-size:14px;margin:8px 0}.pr-data-value{font-size:24px;font-weight:900;letter-spacing:-.035em;color:#19734d;line-height:1.2}.pr-data-unit{font-size:11px;color:var(--ink-soft);font-weight:700}.pr-data-card p{font-size:12px;line-height:1.65}.pr-source{font-size:11px;overflow-wrap:anywhere;color:var(--ink-soft)}.pr-source a{color:var(--seal);font-weight:700;text-decoration:none}.pr-source a:hover{text-decoration:underline}
 .pr-guesstimate-answer{border-radius:15px;background:linear-gradient(135deg,#173d32,#26755a);padding:18px;color:#fff;margin:14px 0}.pr-guesstimate-answer small{display:block;color:#cdebd9;text-transform:uppercase;letter-spacing:.1em;font-size:10px;font-weight:850}.pr-guesstimate-answer strong{display:block;font-size:23px;line-height:1.35;margin-top:6px}.pr-archive{margin-top:20px}.pr-archive details{border:1px solid var(--rule);border-radius:13px;background:var(--surface);padding:12px 14px;margin:8px 0}.pr-archive summary{cursor:pointer;font-size:12px;font-weight:800}.pr-data-point{padding:13px 0;border-top:1px solid var(--rule)}.pr-data-point:first-child{border-top:0}.pr-muted{font-size:11px;color:var(--ink-soft);line-height:1.6}.pr-status{padding:15px;border-radius:13px;background:var(--paper-alt);font-size:12px;line-height:1.6;border:1px solid var(--rule)}.pr-error{color:#b42318}.pr-good{color:#237447}
 .pr-import-help{font-size:12px;line-height:1.6;color:var(--ink-soft)}.pr-import-text{width:100%;min-height:180px;resize:vertical;font:inherit;font-size:12px;line-height:1.6;padding:12px;border:1px solid var(--rule);border-radius:12px;background:var(--surface);color:var(--ink)}.pr-modal-label{display:block;font-size:12px;font-weight:800;margin:12px 0 6px}.pr-modal-input{width:100%;padding:11px 12px;border:1px solid var(--rule);border-radius:11px;background:var(--surface);color:var(--ink);font:inherit;font-size:13px}
+
+/* Structured cards for PDF-imported placement material */
+.pr-imported-list{display:grid;grid-template-columns:1fr;gap:14px;margin:10px 0 18px}
+.pr-imported-card{border:1px solid var(--rule);background:var(--surface);border-radius:18px;overflow:hidden;box-shadow:0 7px 22px rgba(15,23,42,.045);min-width:0}
+.pr-imported-head{padding:18px 20px 14px;background:linear-gradient(120deg,rgba(226,244,234,.82),rgba(248,252,249,.72));border-bottom:1px solid var(--rule)}
+.pr-imported-head h3{margin:7px 0 5px;font-size:19px;line-height:1.35;letter-spacing:-.025em;color:var(--ink)}
+.pr-imported-body{padding:clamp(15px,2vw,22px)}
+.pr-import-section{padding:12px 14px;margin:10px 0;border:1px solid var(--rule);background:var(--paper-alt);border-radius:12px}
+.pr-import-section h4{margin:0 0 7px;color:#246b4c;font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
+.pr-import-section p,.pr-import-section li{font-size:13px;line-height:1.75;margin:4px 0}
+.pr-import-section ul,.pr-import-section ol{padding-left:20px;margin:5px 0}
+.pr-import-paragraph{font-size:13px;line-height:1.8;color:var(--ink);margin:10px 0;white-space:normal}
+.pr-formatted-paragraph{font-size:14px;line-height:1.8;margin:11px 0;color:var(--ink);overflow-wrap:anywhere}.pr-formatted-list{padding-left:22px;margin:9px 0 14px}.pr-formatted-list li{font-size:14px;line-height:1.75;margin:6px 0;padding-left:3px}.pr-inline-heading{font-size:12px;font-weight:900;letter-spacing:.04em;color:#0f766e;text-transform:uppercase;margin:17px 0 7px;padding-bottom:6px;border-bottom:1px solid var(--rule)}
+.pr-pdf-data-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.pr-pdf-data-card{position:relative;min-width:0;border:1px solid var(--rule);border-radius:15px;background:var(--surface);padding:16px;overflow:hidden;box-shadow:0 4px 16px rgba(15,23,42,.035)}
+.pr-pdf-data-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(#25865c,#b9e4cb)}
+.pr-pdf-data-card h4{margin:8px 0;font-size:14px;line-height:1.5;color:var(--ink)}
+.pr-pdf-data-number{font-size:clamp(21px,3vw,28px);font-weight:900;letter-spacing:-.035em;color:#19734d;line-height:1.25;overflow-wrap:anywhere}
+.pr-pdf-data-meta{font-size:10px;color:var(--ink-soft);font-weight:850;letter-spacing:.08em;text-transform:uppercase}
+.pr-pdf-data-card p{font-size:12px;line-height:1.7;margin:9px 0;color:var(--ink)}
+.pr-pdf-data-source{font-size:11px;line-height:1.6;overflow-wrap:anywhere;color:var(--ink-soft);margin-top:12px;padding-top:10px;border-top:1px solid var(--rule)}
+.pr-pdf-data-source a{color:var(--seal);font-weight:800;text-decoration:none}.pr-pdf-data-source a:hover{text-decoration:underline}
+.pr-imported-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:0 20px 16px}
+@media(max-width:760px){.pr-pdf-data-grid{grid-template-columns:1fr}.pr-imported-head{padding:16px}.pr-imported-foot{padding:0 16px 15px}}
 @media(max-width:760px){.pr-layout{grid-template-columns:1fr}.pr-side-card{order:2}.pr-data-grid{grid-template-columns:1fr}.pr-tab{flex-direction:column;gap:5px;min-height:66px;padding:8px 4px;font-size:10px}.pr-tab .pr-tab-num{width:24px;height:24px}.pr-section-head{align-items:flex-start;flex-direction:column}.pr-kpis{gap:8px}.pr-kpi{padding:12px}.pr-kpi b{font-size:20px}}
 @media(max-width:420px){.pr-hero{border-radius:18px}.pr-tabs{gap:4px;padding:4px}.pr-tab{font-size:9px}.pr-hero-meta span{font-size:10px}.pr-kpi span{font-size:10px}}
-
-/* Readability layer for bulk PDF imports: hierarchy, spacing and scan-friendly points. */
-.pr-readable-content{max-width:100%;color:var(--ink);font-size:14px;line-height:1.8;overflow-wrap:anywhere}
-.pr-reading-section{margin:18px 0 20px;padding:0 0 4px;border:1px solid #dbe9e1;border-radius:15px;background:linear-gradient(180deg,#fbfefc 0%,var(--surface) 100%);overflow:hidden}
-.pr-reading-section:first-child{margin-top:4px}
-.pr-reading-section-head{display:flex;align-items:center;gap:11px;padding:13px 16px;background:#eaf5ee;border-bottom:1px solid #d6e9dd}
-.pr-reading-section-head h4{margin:0!important;font-size:13px!important;line-height:1.5;color:#18583e;letter-spacing:.025em;font-weight:850}
-.pr-reading-section-num{display:grid;place-items:center;min-width:34px;height:30px;padding:0 7px;border-radius:9px;background:#176b4a;color:#fff;font-size:11px;font-weight:900;letter-spacing:.04em}
-.pr-reading-section-dot{color:#218258;font-size:11px}
-.pr-reading-paragraph{margin:13px 16px!important;font-size:13px!important;line-height:1.85!important;color:var(--ink-soft)}
-.pr-reading-point{display:grid;grid-template-columns:22px minmax(0,1fr);gap:8px;margin:8px 14px;padding:11px 12px;border:1px solid #e1eee6;border-radius:11px;background:#f7fbf8}
-.pr-reading-point-marker{display:grid;place-items:center;width:21px;height:21px;border-radius:7px;background:#dcefe3;color:#176b4a;font-weight:900;font-size:14px}
-.pr-reading-point strong{display:block;color:#205f44;font-size:12px;line-height:1.6;margin-bottom:2px}
-.pr-reading-point p{margin:0!important;font-size:12px!important;line-height:1.75!important;color:#475b51}
-.pr-resource-text{min-width:0}
-@media(max-width:600px){.pr-reading-section{margin:13px 0 16px}.pr-reading-section-head{padding:11px 12px}.pr-reading-paragraph{margin:11px 12px!important}.pr-reading-point{margin:7px 9px;padding:10px}}
-
-/* Placement Readiness visual refresh: high-stakes charcoal, ivory and amber; no green panels. */
-.pr-hero{background:radial-gradient(circle at 92% 5%,rgba(249,115,22,.24),transparent 27%),linear-gradient(125deg,#111827 0%,#202938 55%,#3a2020 100%);border:1px solid rgba(251,146,60,.35);box-shadow:0 18px 42px rgba(17,24,39,.22)}
-.pr-hero:before,.pr-hero:after{border-color:rgba(251,146,60,.16)}
-.pr-hero .pr-tag{color:#fed7aa;border-color:rgba(251,146,60,.4);background:rgba(249,115,22,.11)}
-.pr-hero-meta span{color:#f3f4f6;background:rgba(255,255,255,.065);border-color:rgba(255,255,255,.13)}
-.pr-quote-bar{position:relative;z-index:1;display:grid;grid-template-columns:38px minmax(0,1fr) 24px;align-items:center;gap:12px;margin-top:20px;padding:15px 17px;border:1px solid rgba(251,146,60,.32);border-left:4px solid #f97316;border-radius:14px;background:linear-gradient(100deg,rgba(249,115,22,.14),rgba(255,255,255,.055));min-height:91px;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
-.pr-quote-mark{font-family:Georgia,serif;font-size:54px;line-height:.8;color:#fb923c;align-self:start}.pr-quote-copy{min-width:0}.pr-quote-copy p{font-size:14px!important;font-weight:750;line-height:1.55!important;color:#fff!important;margin:0!important;max-width:unset;transition:opacity .22s ease,transform .22s ease}.pr-quote-copy p.pr-quote-fade{opacity:0;transform:translateY(4px)}.pr-quote-copy span{display:block;margin-top:7px;font-size:9px;font-weight:900;letter-spacing:.13em;color:#fdba74;text-transform:uppercase}.pr-quote-flare{font-size:19px;color:#fb923c;justify-self:end}
-/* Warm amber accent for active navigation, highlights and readable imported notes. */
-.pr-tab.active{color:#7c2d12;background:linear-gradient(135deg,#fff1df,#fffaf3);border-color:#fed7aa;box-shadow:inset 0 -3px 0 #f97316}.pr-tab.active .pr-tab-num{background:#fed7aa;color:#7c2d12}
-.pr-kpi:after{background:rgba(249,115,22,.10)}
-.pr-kpi b{color:var(--ink)}
-.pr-reading-section{border-color:#eadfd2;background:linear-gradient(180deg,#fffaf4 0%,var(--surface) 100%)}
-.pr-reading-section-head{background:#fff0df;border-bottom-color:#f2d8bd}
-.pr-reading-section-head h4{color:#7c2d12}
-.pr-reading-section-num{background:#c2410c;color:#fff}
-.pr-reading-section-dot{color:#ea580c}
-.pr-reading-point{border-color:#f0e1d1;background:#fffaf5}
-.pr-reading-point-marker{background:#ffead2;color:#9a3412}
-.pr-reading-point strong{color:#8a3412}
-.pr-reading-point p{color:#4b5563}
-.pr-practice-tag,.pr-tag{letter-spacing:.06em}
-.pr-highlight{border-left-color:#f97316!important;background:linear-gradient(100deg,rgba(249,115,22,.09),rgba(249,115,22,.025))!important}
-.pr-step-num{background:#fff0df!important;color:#9a3412!important}
-.pr-guesstimate-answer{background:linear-gradient(135deg,#1f2937,#7c2d12)}
-.pr-guesstimate-answer small{color:#fed7aa}
-.pr-status{background:var(--paper-alt)}
-.pr-hero .pr-actions .btn{border-color:rgba(255,255,255,.22)}
-@media(max-width:600px){.pr-quote-bar{grid-template-columns:26px minmax(0,1fr);gap:9px;padding:13px 12px;min-height:unset}.pr-quote-mark{font-size:43px}.pr-quote-copy p{font-size:12px!important}.pr-quote-flare{display:none}.pr-quote-copy span{font-size:8px}.pr-hero{padding:18px}}
-@media(prefers-reduced-motion:reduce){.pr-quote-copy p{transition:none}}
-/* Mobile-first PDF reading: prevent flattened PDF text from becoming an unreadable wall. */
-.pr-resource-text,.pr-readable-content{width:100%;min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:normal}
-.pr-readable-content{white-space:normal;text-align:left}
-.pr-reading-section{display:block;width:100%;box-sizing:border-box}
-.pr-reading-section-head{display:flex;align-items:flex-start;min-width:0}
-.pr-reading-section-head h4{min-width:0;overflow-wrap:anywhere}
-.pr-reading-paragraph{max-width:100%;text-align:left;white-space:normal;overflow-wrap:anywhere}
-.pr-reading-point{box-sizing:border-box;grid-template-columns:22px minmax(0,1fr);align-items:start;min-width:0}
-.pr-reading-point>div{min-width:0;overflow-wrap:anywhere}
-.pr-reading-point p{white-space:normal;overflow-wrap:anywhere}
-@media(max-width:600px){
- .pr-resource-text{font-size:13px}
- .pr-readable-content{font-size:13px;line-height:1.72}
- .pr-reading-section{border-radius:12px;margin:12px 0 15px}
- .pr-reading-section-head{gap:8px;padding:11px 10px}
- .pr-reading-section-num{flex:0 0 auto;min-width:29px;height:27px;font-size:10px}
- .pr-reading-section-head h4{font-size:12px!important;line-height:1.45!important}
- .pr-reading-paragraph{margin:10px 11px!important;font-size:12px!important;line-height:1.75!important}
- .pr-reading-point{grid-template-columns:20px minmax(0,1fr);gap:7px;margin:7px 8px;padding:10px 9px;border-radius:10px}
- .pr-reading-point-marker{width:20px;height:20px}
- .pr-reading-point strong{font-size:12px;line-height:1.5}
- .pr-reading-point p{font-size:12px!important;line-height:1.7!important}
- .pr-card{padding:14px;border-radius:15px}
- .pr-card h3{font-size:17px;line-height:1.35}
- .pr-card p,.pr-card li{overflow-wrap:anywhere}
-}
-@media(max-width:380px){.pr-reading-section-head{padding:10px 8px}.pr-reading-paragraph{margin:9px!important}.pr-reading-point{margin:6px;padding:9px 8px}.pr-hero-meta span{padding:7px 8px}}
-
+/* Final readability and subject-folder polish */
+.pr-hero{background:radial-gradient(circle at 88% 8%,rgba(45,212,191,.22),transparent 30%),linear-gradient(125deg,#10243a 0%,#123f50 48%,#087f5b 100%);box-shadow:0 16px 38px rgba(16,55,68,.2)}
+.pr-hero h2{letter-spacing:-.025em}.pr-hero p{font-size:15px;line-height:1.75;max-width:760px}
+.pr-card p,.pr-card li,.pr-import-section p,.pr-import-section li,.pr-import-paragraph{font-size:14px;line-height:1.78}
+.pr-imported-head{background:linear-gradient(120deg,#eef8f4,#f8fbff)}
+.pr-import-section{padding:15px 16px;margin:12px 0;background:var(--surface);border-left:3px solid #0d9488}
+.pr-import-section h4{font-size:12px;letter-spacing:.045em;color:#0f766e}
+.pr-import-paragraph{margin:12px 0;overflow-wrap:anywhere}
+.pr-tabs{position:relative;scroll-margin-top:12px}.pr-tab.active{color:#075e55;background:linear-gradient(135deg,#e3f7f1,#effaf5);border-color:#a7dfcf;box-shadow:inset 0 -3px 0 #0d9488}.pr-tab.active .pr-tab-num{background:#c5f1e5;color:#075e55}
+.pr-data-value,.pr-pdf-data-number{color:#087f5b}.pr-guesstimate-answer{background:linear-gradient(135deg,#10243a,#0f766e 68%,#087f5b)}
+.rvault-topline{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:20px 0 14px}.rvault-topline h3{margin:4px 0;font-size:21px;letter-spacing:-.025em}.rvault-topline p{margin:0;color:var(--ink-soft);font-size:13px;line-height:1.6}.rvault-eyebrow{font-size:10px;font-weight:900;letter-spacing:.12em;color:#0f766e}.rvault-folder-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:12px 0 20px}.rvault-folder-card{display:flex;align-items:center;gap:13px;min-width:0;text-align:left;padding:16px;border:1px solid var(--rule);border-radius:16px;background:var(--surface);color:var(--ink);cursor:pointer;box-shadow:0 5px 18px rgba(15,23,42,.035);transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}.rvault-folder-card:hover{transform:translateY(-2px);border-color:#8fd5c4;box-shadow:0 10px 24px rgba(15,118,110,.1)}.rvault-folder-art{display:grid;place-items:center;flex:0 0 46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#dff7ef,#e8f2ff);font-size:23px}.rvault-folder-text{display:flex;flex-direction:column;gap:5px;min-width:0;flex:1}.rvault-folder-text b{font-size:14px;line-height:1.45;overflow-wrap:anywhere}.rvault-folder-text small{font-size:11px;line-height:1.45;color:var(--ink-soft)}.rvault-folder-arrow{font-size:23px;color:#0f766e}.rvault-folder-hero{display:flex;align-items:center;gap:14px;margin:14px 0 18px;padding:19px;border:1px solid #b8e4d7;border-radius:18px;background:linear-gradient(115deg,#eefaf5,#f3f8ff);color:#163d43}.rvault-folder-icon{display:grid;place-items:center;flex:0 0 52px;height:52px;border-radius:15px;background:#d2f3e7;font-size:26px}.rvault-folder-copy{min-width:0;flex:1}.rvault-folder-copy h2{margin:4px 0;font-size:clamp(20px,3vw,27px);line-height:1.25;overflow-wrap:anywhere}.rvault-folder-copy p{margin:0;color:#527078;font-size:13px;line-height:1.6}.rvault-count{align-self:flex-start;padding:7px 10px;border-radius:999px;background:#d8f5e9;color:#08634f;font-size:11px;font-weight:800;white-space:nowrap}.rvault-breadcrumb{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:8px 0;color:var(--ink-soft);font-size:12px}.rvault-back{border:0;background:transparent;color:#0f766e;font:inherit;font-weight:800;cursor:pointer;padding:7px 0}.rvault-resource-list{padding:4px 14px}.rvault-resource-item{padding:14px 0;border-bottom:1px solid var(--rule)}.rvault-resource-item:last-child{border-bottom:0}.rvault-empty{text-align:center;padding:30px 16px}.rvault-empty-icon{font-size:32px}.rvault-empty h3{margin:8px 0 5px;font-size:17px}.rvault-empty p{margin:0 auto 14px;max-width:440px;color:var(--ink-soft);font-size:13px;line-height:1.65}.rvault-general-wrap{margin-top:8px}.rvault-general-folder{width:100%;display:flex;align-items:center;gap:12px;padding:14px;border:1px dashed var(--rule);border-radius:14px;background:var(--surface);color:var(--ink);text-align:left;cursor:pointer}.rvault-general-folder>span:nth-child(2){display:flex;flex-direction:column;gap:4px;flex:1}.rvault-general-folder small{font-size:11px;color:var(--ink-soft)}
+@media(max-width:640px){.rvault-topline{align-items:flex-start;flex-direction:column}.rvault-topline .btn{width:100%}.rvault-folder-grid{grid-template-columns:1fr}.rvault-folder-card{padding:14px}.rvault-folder-hero{align-items:flex-start;padding:15px;gap:10px;flex-wrap:wrap}.rvault-folder-icon{flex-basis:44px;height:44px}.rvault-count{margin-left:auto}.pr-hero p{font-size:14px}.pr-card p,.pr-card li,.pr-import-section p,.pr-import-section li,.pr-import-paragraph{font-size:14px}}
 </style>
 <script id="acadcom-placement-readiness">
 (function(){
@@ -11248,79 +11186,28 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
   const escPR = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const arrPR = (v) => Array.isArray(v) ? v : [];
   const listPR = (v) => arrPR(v).map(x => '<li>'+escPR(x)+'</li>').join('');
-  // Imported topic-bank resources cannot use placement_bookmarks/placement_completions,
-  // because those tables are intentionally foreign-keyed to placement_daily_packs.
-  // Keep manual-resource progress local to this browser and scoped to the signed-in user.
-  function prLocalProgressKey(kind,userId){return 'acadcom:placement:'+kind+':'+String(userId||'guest');}
-  function prReadLocalProgress(kind,userId){try{const v=JSON.parse(localStorage.getItem(prLocalProgressKey(kind,userId))||'[]');return new Set(Array.isArray(v)?v:[]);}catch(_){return new Set();}}
-  function prWriteLocalProgress(kind,userId,set){try{localStorage.setItem(prLocalProgressKey(kind,userId),JSON.stringify([...set]));return true;}catch(_){return false;}}
-  window.prToggleManualBookmark=function(topicId,currentlyBookmarked){return prToggleLocalResourceProgress('bookmarks',topicId,currentlyBookmarked,'Bookmark');};
-  window.prToggleManualComplete=function(topicId,currentlyComplete){return prToggleLocalResourceProgress('completed',topicId,currentlyComplete,'Progress');};
-  async function prToggleLocalResourceProgress(kind,topicId,current,label){
-    const sb=window.supabaseClient;if(!sb){toast('Supabase connection unavailable.');return;}
-    const {data:{user},error}=await sb.auth.getUser();if(error||!user){toast('Please sign in again.');return;}
-    const set=prReadLocalProgress(kind,user.id);if(current)set.delete(topicId);else set.add(topicId);
-    if(!prWriteLocalProgress(kind,user.id,set)){toast(label+' could not be saved in this browser.');return;}
-    loadPlacementReadiness();
-  }
   window.prRefresh = async function(){ if (typeof renderPlacementReadiness === 'function') { document.getElementById('screen').innerHTML = renderPlacementReadiness(); } };
   window.prToggleBookmark = async function(packId, currentlyBookmarked){
     const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
-    const {data:{user},error:authError}=await sb.auth.getUser(); if(authError||!user){toast('Please sign in again.');return;}
+    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
     const q=currentlyBookmarked ? sb.from('placement_bookmarks').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_bookmarks').insert({pack_id:packId,user_id:user.id});
-    const {error}=await q; if(error){console.error(error);toast('Bookmark could not be saved.');return;} loadPlacementReadiness();
+    const {error}=await q; if(error){console.error(error);toast('Bookmark could not be saved.');return;} render();
   };
   window.prToggleComplete = async function(packId, currentlyComplete){
     const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
-    const {data:{user},error:authError}=await sb.auth.getUser(); if(authError||!user){toast('Please sign in again.');return;}
+    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
     const q=currentlyComplete ? sb.from('placement_completions').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_completions').insert({pack_id:packId,user_id:user.id});
-    const {error}=await q; if(error){console.error(error);toast('Progress could not be saved.');return;} loadPlacementReadiness();
+    const {error}=await q; if(error){console.error(error);toast('Progress could not be saved.');return;} render();
   };
   window.prActiveTab = window.prActiveTab || 'gd';
   window.renderPlacementReadiness = function(){
     const admin = CURRENT_USER?.role === 'admin';
-    if(window.prQuoteTimer){clearInterval(window.prQuoteTimer);window.prQuoteTimer=null;}
-    const quotes = [
-      'Your placement season will not wait for your confidence. Build it before the room starts judging.',
-      'Someone else is preparing for the role you want. Make your next hour count.',
-      'A shortlist gets you in the room. Your thinking, evidence and presence earn the offer.',
-      'When the pressure rises, preparation speaks. Give yourself something powerful to rely on.',
-      'Do not enter a GD to be heard. Enter with a point that moves the discussion forward.',
-      'Know the business beyond the buzzwords: margins, customers, supply chains, risks and execution.',
-      'One sharp insight backed by evidence can outweigh five minutes of empty confidence.',
-      'The panel is not looking for perfection. Show structured thinking, ownership and the courage to learn.',
-      'Your degree gets noticed. Your ability to solve a real business problem gets remembered.',
-      'Turn every case into a decision: define the problem, use facts, weigh trade-offs and act.',
-      'Do the uncomfortable preparation now so pressure does not make the decisions for you.',
-      'Speak with conviction, listen with intent and disagree without disrespect. That is leadership in a GD.',
-      'A strong answer connects the farmer, the customer, the company and the numbers.',
-      'Do not memorise answers alone. Understand the logic well enough to defend it when challenged.',
-      'Every mock interview is a rehearsal. Every mistake is feedback. Use both before the real stage.',
-      'You cannot control the panel or the competition. You can control the quality of your preparation.',
-      'Bring examples, not adjectives. Bring numbers, not guesses. Bring solutions, not complaints.',
-      'When others rush to speak, pause, think and add something useful. Calm is a competitive advantage.',
-      'The offer is the outcome. The daily discipline, sharper judgement and stronger communication are built now.',
-      'Walk in prepared to contribute, not desperate to impress. Let the quality of your thinking do the work.'
-    ];
-    setTimeout(()=>{
-      const quoteEl=document.getElementById('pr-motivation-quote');
-      if(!quoteEl)return;
-      let qi=0;
-      window.prQuoteTimer=setInterval(()=>{
-        const q=document.getElementById('pr-motivation-quote');
-        if(!q){clearInterval(window.prQuoteTimer);window.prQuoteTimer=null;return;}
-        qi=(qi+1)%quotes.length;
-        q.classList.add('pr-quote-fade');
-        setTimeout(()=>{const current=document.getElementById('pr-motivation-quote');if(!current)return;current.textContent=quotes[qi];current.classList.remove('pr-quote-fade');},220);
-      },6500);
-    },0);
     return `<div class="pr-wrap">
       <section class="pr-hero">
-        <span class="pr-tag">MANAGE · PGDM-ABM</span>
+        <span class="pr-tag">✦ MANAGE · PGDM-ABM</span>
         <h2>Placement Readiness</h2>
         <p>Prepare with purpose. Speak with evidence. Your focused workspace for group discussions, solved guesstimates and high-impact agribusiness insights.</p>
         <div class="pr-hero-meta"><span>◉ GD playbooks</span><span>∑ Solved guesstimates</span><span>↗ Agribusiness data</span></div>
-        <div class="pr-quote-bar" aria-live="polite" aria-atomic="true"><span class="pr-quote-mark">“</span><div class="pr-quote-copy"><p id="pr-motivation-quote">Your next opportunity favours the person who prepared before it arrived.</p><span id="pr-motivation-index">PREPARE WITH INTENT · SHOW YOUR EDGE</span></div><span class="pr-quote-flare" aria-hidden="true">✦</span></div>
         <div class="pr-actions"><button class="btn btn-sm" onclick="setTab('more')">← More</button><button class="btn btn-sm" onclick="render()">↻ Refresh</button>${admin?'<button class="btn btn-primary btn-sm" onclick="prOpenPdfImport()">＋ Import PDF</button>':''}</div>
       </section>
       <div id="pr-content"><div class="pr-status">Loading your preparation workspace…</div></div>
@@ -11403,6 +11290,18 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
     }catch(e){console.error('Placement PDF publish failed:',e);toast('Could not publish PDF: '+(e.message||'Check Supabase policies.'));}
     finally{if(btn){btn.disabled=false;btn.textContent='Save and publish';}}
   };
+  window.prToggleBookmark = async function(packId, currentlyBookmarked){
+    const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
+    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
+    const q=currentlyBookmarked ? sb.from('placement_bookmarks').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_bookmarks').insert({pack_id:packId,user_id:user.id});
+    const {error}=await q; if(error){console.error(error);toast('Bookmark could not be saved.');return;} render();
+  };
+  window.prToggleComplete = async function(packId, currentlyComplete){
+    const sb=window.supabaseClient; if(!sb){toast('Supabase connection unavailable.');return;}
+    const {data:{user}}=await sb.auth.getUser(); if(!user){toast('Please sign in again.');return;}
+    const q=currentlyComplete ? sb.from('placement_completions').delete().eq('pack_id',packId).eq('user_id',user.id) : sb.from('placement_completions').insert({pack_id:packId,user_id:user.id});
+    const {error}=await q; if(error){console.error(error);toast('Progress could not be saved.');return;} render();
+  };
   const baseRender = render;
   render = function(){
     if (TAB === 'placement') {
@@ -11418,52 +11317,117 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
   function prFormatText(value){
     const raw=String(value||'').replace(/\r/g,'').trim();
     if(!raw)return '<p class="pr-muted">No content provided in this section yet.</p>';
-    // PDF extractors often flatten a whole page into one text block. Rebuild a
-    // readable hierarchy from numbered headings, uppercase headings and labelled points.
-    let sourceLines=raw.split(/\n+/).map(x=>x.replace(/[\t ]+/g,' ').trim()).filter(Boolean);
-    // Some PDFs extract as one continuous line. Recover headings and sentence-sized units first.
-    if(sourceLines.length<=2 && raw.length>500){
-      let normalized=raw.replace(/\s+/g,' ');
-      normalized=normalized.replace(/\s+(?=(?:\d{1,2}|[IVX]{1,5})\s*[|.)—:-]\s*[A-Z])/g,'\n');
-      normalized=normalized.replace(/\s+(?=[A-Z][A-Z0-9 &/(),:'’?-]{3,75}(?:\s|$))/g,'\n');
-      sourceLines=normalized.split(/\n+/).map(x=>x.trim()).filter(Boolean);
-      // Split oversized prose lines into short readable paragraphs, preserving sentence order.
-      sourceLines=sourceLines.flatMap(line=>{
-        if(line.length<=360 || isHeadingLikeForSplit(line)) return [line];
-        const sentences=line.match(/[^.!?]+[.!?]+(?:[”’"')\]]+)?|[^.!?]+$/g)||[line];
-        const chunks=[];let chunk='';
-        for(const sentence of sentences){const part=sentence.trim();if(!part)continue;if(chunk && (chunk.length+part.length+1>260)){chunks.push(chunk);chunk=part;}else chunk+=(chunk?' ':'')+part;}
-        if(chunk)chunks.push(chunk);return chunks;
-      });
+    // Keep meaningful line breaks and convert plain-text dumps into readable blocks.
+    let lines=raw.split(/\n+/).map(x=>x.replace(/[\t ]+/g,' ').trim()).filter(Boolean);
+    if(lines.length===1){
+      const sentenceParts=raw.match(/[^.!?]+[.!?]+(?:[”’"']?)(?=\s|$)|[^.!?]+$/g)||[raw];
+      if(sentenceParts.length>=4){lines=[];let chunk=[];sentenceParts.forEach((part,i)=>{chunk.push(part.trim());if(chunk.length>=3||i===sentenceParts.length-1){lines.push(chunk.join(' '));chunk=[];}});}
+      else lines=[raw];
     }
-    const lines=sourceLines;
-    function isHeadingLikeForSplit(line){return line.length>=4&&line.length<=100&&line===line.toLocaleUpperCase()&&/[A-Z]{3}/.test(line)&&!/[.!?]$/.test(line)}
-    const out=[]; let paragraph=[]; let sectionOpen=false;
-    const flushParagraph=()=>{if(!paragraph.length)return;const text=paragraph.join(' ').trim();if(text)out.push('<p class="pr-reading-paragraph">'+escPR(text)+'</p>');paragraph=[];};
-    const closeSection=()=>{flushParagraph();if(sectionOpen){out.push('</section>');sectionOpen=false;}};
-    const isNumberedHeading=line=>/^(?:\d{1,2}|[IVX]{1,5})\s*[|.)—:-]\s*[A-Z][^.!?]{1,100}$/.test(line);
-    const isUpperHeading=line=>line.length>=4&&line.length<=100&&/[A-Z]/.test(line)&&line===line.toLocaleUpperCase()&&/[A-Z]/.test(line.replace(/[^A-Z]/g,''))&&/[A-Z]{3}/.test(line)&&!/[.!?]$/.test(line);
-    const labelPoint=line=>{let m=line.match(/^(.{2,64}?)\s+[—–-]\s+(.{8,})$/);if(!m)return null;const label=m[1].trim();if(label.length>64||/[.!?]$/.test(label))return null;return {label,body:m[2].trim()};};
-    for(const line of lines){
-      if(isNumberedHeading(line)){
-        closeSection(); const m=line.match(/^(\S+)\s*[|.)—:-]\s*(.+)$/); const num=m?m[1]:''; const title=m?m[2]:line;
-        out.push('<section class="pr-reading-section"><div class="pr-reading-section-head"><span class="pr-reading-section-num">'+escPR(num)+'</span><h4>'+escPR(title)+'</h4></div>');sectionOpen=true;continue;
-      }
-      if(isUpperHeading(line)){
-        closeSection();out.push('<section class="pr-reading-section"><div class="pr-reading-section-head"><span class="pr-reading-section-dot">◆</span><h4>'+escPR(line)+'</h4></div>');sectionOpen=true;continue;
-      }
-      const point=labelPoint(line);
-      if(point){flushParagraph();out.push('<div class="pr-reading-point"><span class="pr-reading-point-marker">•</span><div><strong>'+escPR(point.label)+'</strong><p>'+escPR(point.body)+'</p></div></div>');continue;}
-      if(/^(?:[-•*▪◦])\s+/.test(line)){
-        flushParagraph();out.push('<div class="pr-reading-point"><span class="pr-reading-point-marker">•</span><div><p>'+escPR(line.replace(/^(?:[-•*▪◦])\s+/,''))+'</p></div></div>');continue;
-      }
+    let out='',paragraph=[],list=[],listTag='ul';
+    const flushP=()=>{if(paragraph.length){out+='<p class="pr-formatted-paragraph">'+escPR(paragraph.join(' '))+'</p>';paragraph=[];}};
+    const flushL=()=>{if(list.length){out+='<'+listTag+' class="pr-formatted-list">'+list.map(x=>'<li>'+escPR(x)+'</li>').join('')+'</'+listTag+'>';list=[];}};
+    const headings=/^(context|background|key facts|arguments? for|arguments? against|supporting view|counterarguments?|solutions?|solution framework|opening statement|conclusion|follow[- ]?up questions|assumptions|calculation(?: steps)?|sanity check|sensitivity analysis|final estimate|interview[- ]ready explanation|why it matters|source|sources|business implication|recommendation|risk|opportunity)\s*:?$/i;
+    lines.forEach(line=>{
+      const bullet=line.match(/^(?:[•●▪◦*-]|\d+[.)])\s+(.+)$/);
+      if(bullet){flushP();const nextTag=/^\d+[.)]/.test(line)?'ol':'ul';if(list.length&&nextTag!==listTag)flushL();listTag=nextTag;list.push(bullet[1]);return;}
+      if(headings.test(line)||(/^.{2,70}:$/.test(line)&&!/[.!?]/.test(line))){flushP();flushL();out+='<h4 class="pr-inline-heading">'+escPR(line.replace(/:$/,''))+'</h4>';return;}
       paragraph.push(line);
-    }
-    closeSection();
-    return '<div class="pr-readable-content">'+out.join('')+'</div>';
+    });
+    flushP();flushL();
+    return out||'<p class="pr-muted">No readable text was found in this section.</p>';
   }
   function prTakeaway(items){
     return '<div class="pr-highlight"><div class="pr-highlight-title">Key takeaways</div>'+items.slice(0,4).map((v,i)=>'<div class="pr-takeaway"><i>'+String(i+1).padStart(2,'0')+'</i><div><b>'+escPR(v)+'</b></div></div>').join('')+'</div>';
+  }
+  function prSplitContentLines(value){
+    return String(value||'').replace(/\r/g,'').split('\n').map(x=>x.replace(/\bI(?=\d[\d,.]*\s*(?:lakh|crore|billion|million))/gi,'₹').replace(/[\t ]+/g,' ').trim());
+  }
+  function prLabelKey(label){
+    return String(label||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+  }
+  function prRenderStructuredText(value,type){
+    const lines=prSplitContentLines(value); let out='',paragraph=[],list=[],listTag='ul',sectionOpen=false;
+    const flushParagraph=()=>{if(paragraph.length){out+='<p class="pr-import-paragraph">'+escPR(paragraph.join(' '))+'</p>';paragraph=[];}};
+    const flushList=()=>{if(list.length){out+='<'+listTag+'>'+list.map(x=>'<li>'+escPR(x)+'</li>').join('')+'</'+listTag+'>';list=[];}};
+    const closeSection=()=>{if(sectionOpen){out+='</div>';sectionOpen=false;}};
+    const isHeading=(line)=>{
+      if(!line || line.length>100) return false;
+      const clean=line.replace(/^#+\s*/, '').replace(/:$/, '').trim();
+      if(/^(topic|discussion topic|context|background|opening statement|key arguments|arguments for|supporting arguments|arguments against|counterarguments|solution|solutions|solution framework|conclusion|key takeaways|likely follow up questions|question|problem statement|approach|assumptions|calculation|calculation steps|step by step calculation|sanity check|final estimate|interview ready explanation|interview explanation|why it matters|use in gd|use in interview|source|sources|summary|recommendation|recommendations|business implications|key risks|opportunities|data point|figure|period|year)$/i.test(clean)) return true;
+      if(/^\d+(?:\.\d+)?\s*[.)·:-]\s+\S/.test(clean) && clean.length<82) return true;
+      if(/^[A-Z][A-Z\s/&()–-]{3,75}$/.test(clean) && !/[.!?]$/.test(clean)) return true;
+      if(/^[^.!?]{2,62}:$/.test(line)) return true;
+      return false;
+    };
+    for(const line0 of lines){
+      const line=line0.replace(/^#{1,4}\s*/, '').trim();
+      if(!line){flushParagraph();flushList();continue;}
+      const bullet=line.match(/^(?:[•●▪◦*-]|\d+[.)])\s+(.+)$/);
+      if(bullet){flushParagraph();const tag=/^\d+[.)]/.test(line)?'ol':'ul';if(list.length&&tag!==listTag)flushList();listTag=tag;list.push(bullet[1]);continue;}
+      if(isHeading(line)){flushParagraph();flushList();closeSection();const heading=line.replace(/:$/,'').replace(/^\d+(?:\.\d+)?\s*[.)·:-]\s*/, '');out+='<div class="pr-import-section"><h4>'+escPR(heading)+'</h4>';sectionOpen=true;continue;}
+      paragraph.push(line);
+    }
+    flushParagraph();flushList();closeSection();
+    return out||'<p class="pr-muted">No readable text was found in this PDF section.</p>';
+  }
+  function prParseDataPoints(value){
+    const raw=String(value||'').replace(/\r/g,'');
+    const marker=/\bDP\s*-\s*\d{1,2}\b/gi; const matches=[...raw.matchAll(marker)];
+    if(!matches.length) return [];
+    const blocks=matches.map((m,i)=>raw.slice(m.index, i+1<matches.length?matches[i+1].index:raw.length).trim());
+    const fields={title:['title','indicator','topic','data point','metric'],figure:['figure','value','number','statistic'],period:['period','year','reference period'],context:['context','what it tells us','meaning','background'],use:['gd interview use','gd interview application','use in gd','use in interview','placement relevance','why it matters','application'],source:['source','organisation','organization','source organization','source organisation'],url:['source url','url','link']};
+    return blocks.map((block,index)=>{
+      const lines=prSplitContentLines(block).filter(Boolean).filter(x=>!/^I{8,}$/.test(x));
+      const item={id:((lines[0]||'').match(/DP\s*-\s*\d{1,2}/i)||[])[0]||('DP-'+String(index+1).padStart(2,'0')),title:'',figure:'',period:'',context:'',use:'',source:'',url:''};
+      let mode='',footerStarted=false;
+      for(let i=1;i<lines.length;i++){
+        const line=lines[i];
+        if(/^Import validation checklist$/i.test(line)){footerStarted=true;continue;}
+        if(footerStarted)continue;
+        if(/^Placement Readiness\s*[•·]\s*Data Points.*Source-linked test PDF$/i.test(line)||/^PAGE\s+\d+$/i.test(line)||/^PLACEMENT READINESS$/i.test(line)||/^AGRIBUSINESS FACT$/i.test(line))continue;
+        if(/^what the source says\s*:?$/i.test(line)){mode='context';continue;}
+        if(/^how to use (?:this )?in (?:a )?gd(?: or interview)?\s*:?$/i.test(line)||/^how to use this in a gd or interview\s*:?$/i.test(line)){mode='use';continue;}
+        if(/^source\s*:/i.test(line)){item.source+=(item.source?' ':'')+line.replace(/^source\s*:\s*/i,'').trim();mode='source';continue;}
+        if(/^https?:\/\//i.test(line)){item.url+=(item.url?' ':'')+line;continue;}
+        const m=line.match(/^([A-Za-z][A-Za-z /&()-]{1,35})\s*:\s*(.*)$/);
+        if(m){
+          const keyLabel=prLabelKey(m[1]);let matched='';
+          for(const [key,aliases] of Object.entries(fields)){if(aliases.some(a=>prLabelKey(a)===keyLabel)){matched=key;break;}}
+          if(matched){mode=matched;if(m[2])item[matched]+=(item[matched]?' ':'')+m[2].trim();continue;}
+        }
+        if(!item.title){item.title=line;mode='';continue;}
+        if(!item.figure&&!item.period&&/^(?:(?:US\$|₹|\$|€)\s*)?(?:about\s+)?\d[\d,.]*(?:%|\s|$)/i.test(line)&&!/^\d{4}(?:\s*[-–/]\s*\d{2,4})?$/.test(line)){
+          item.figure=line;mode='';continue;
+        }
+        if(!item.figure&&!item.period&&/^first, second, third advance estimates/i.test(line)){item.figure=line;mode='';continue;}
+        if(item.title&&!item.figure&&!item.period&&!item.context&&!item.use&&!item.source&&mode===''&&!/^(?:period|year|source)\s*:/i.test(line)){item.title+=' '+line;continue;}
+        if(mode==='context'||mode==='use'||mode==='source'||mode==='period'||mode==='figure'||mode==='title'){
+          if(mode!=='period'&&mode!=='figure'&&mode!=='title')item[mode]+=(item[mode]?' ':'')+line;
+          continue;
+        }
+        item.context+=(item.context?' ':'')+line;
+      }
+      const foundUrl=item.url.match(/https?:\/\/[^\s)>]+/i);item.url=foundUrl?foundUrl[0].replace(/[.,;]+$/,''):'';
+      if(!item.period){const candidate=lines.find(x=>/^(?:period|year)\s*:/i.test(x));if(candidate)item.period=candidate.replace(/^(?:period|year)\s*:\s*/i,'');}
+      if(!item.figure){const candidate=lines.find(x=>/^(?:(?:US\$|₹|\$|€)\s*)?(?:about\s+)?\d[\d,.]*(?:%|\s|$)/i.test(x)&&!/^\d{4}(?:\s*[-–/]\s*\d{2,4})?$/.test(x));if(candidate)item.figure=candidate.replace(/^I(?=\d)/,'₹');}
+      // In the test pack, title and figure are intentionally standalone lines, while the narrative is grouped under two named sections.
+      if(!item.context){const ix=lines.findIndex(x=>/^what the source says\s*:?$/i.test(x));if(ix>=0){const end=lines.findIndex((x,j)=>j>ix&&(/^how to use /i.test(x)||/^source\s*:/i.test(x)));item.context=lines.slice(ix+1,end<0?lines.length:end).filter(x=>!/^https?:\/\//i.test(x)).join(' ');}}
+      if(!item.use){const ix=lines.findIndex(x=>/^how to use /i.test(x));if(ix>=0){const end=lines.findIndex((x,j)=>j>ix&&/^source\s*:/i.test(x));item.use=lines.slice(ix+1,end<0?lines.length:end).filter(x=>!/^https?:\/\//i.test(x)).join(' ');}}
+      if(!item.source){const candidate=lines.find(x=>/^source\s*:/i.test(x));if(candidate)item.source=candidate.replace(/^source\s*:\s*/i,'');}
+      return item;
+    }).filter(x=>x.title||x.figure||x.context||x.url);
+  }
+  function prRenderDataPointCards(value){
+    const items=prParseDataPoints(value);
+    if(!items.length)return '<div class="pr-imported-body">'+prRenderStructuredText(value,'data_points')+'</div>';
+    return '<div class="pr-imported-body"><div class="pr-pdf-data-grid">'+items.map((d,i)=>{const url=prSafeUrl(d.url);return '<article class="pr-pdf-data-card"><div class="pr-pdf-data-meta">'+escPR(d.id||('DATA POINT '+String(i+1).padStart(2,'0')))+(d.period?' · '+escPR(d.period):'')+'</div><h4>'+escPR(d.title||'Agribusiness indicator')+'</h4>'+(d.figure?'<div class="pr-pdf-data-number">'+escPR(d.figure)+'</div>':'')+(d.context?'<p>'+escPR(d.context)+'</p>':'')+(d.use?'<p><b>Use in GD/interview:</b> '+escPR(d.use)+'</p>':'')+'<div class="pr-pdf-data-source">'+(d.source?'Source: '+escPR(d.source):'Source details')+(url?'<br><a href="'+escPR(url)+'" target="_blank" rel="noopener noreferrer">Open official source ↗</a>':(d.url?'<br>'+escPR(d.url):''))+'</div></article>';}).join('')+'</div></div>';
+  }
+  function prRenderImportedResource(t,tab){
+    const content=String(t.details?.content_text||'');
+    const date= t.created_at ? new Date(t.created_at).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}) : 'Recently published';
+    const body=tab==='data_points'?prRenderDataPointCards(content):'<div class="pr-imported-body">'+prRenderStructuredText(content,tab)+'</div>';
+    return '<article class="pr-imported-card"><div class="pr-imported-head"><span class="pr-tag">📄 PDF IMPORT · '+escPR(tab==='gd'?'GROUP DISCUSSION':tab==='guesstimate'?'GUESSTIMATE':'DATA POINTS')+'</span><h3>'+escPR(t.topic||'Imported preparation material')+'</h3><p class="pr-muted">'+escPR(t.source_deck||'Imported PDF')+' · Published '+escPR(date)+'</p></div>'+body+(CURRENT_USER?.role==='admin'?'<div class="pr-imported-foot"><span class="pr-muted">Admin controls</span><button class="btn btn-sm" onclick="prDeleteResource(\''+String(t.id).replace(/'/g,'')+'\')">Delete imported PDF</button></div>':'')+'</article>';
   }
   async function loadPlacementReadiness(){
     const host=document.getElementById('pr-content'); if(!host)return;
@@ -11480,9 +11444,8 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
       ]);
       if(packErr)throw packErr;if(bmErr)throw bmErr;if(doneErr)throw doneErr;if(topicErr)throw topicErr;
       const bm=new Set((bookmarks||[]).map(x=>x.pack_id)), dn=new Set((done||[]).map(x=>x.pack_id));
-      const manualBm=prReadLocalProgress('bookmarks',user.id), manualDn=prReadLocalProgress('completed',user.id);
       const latest=(packs||[]).find(p=>p.status==='published')||null;
-      const manual=(topics||[]).filter(t=>t.details?.manual_import===true && t.details?.published===true);
+      const manual=(topics||[]).filter(t=>t.details?.manual_import===true && t.details?.published!==false);
       const tab=window.prActiveTab||'gd';
       const tabMeta={
         gd:{num:'01',label:'Group Discussion',short:'GD',desc:'Build a clear opening, balanced arguments and a solution-led conclusion.',type:'gd'},
@@ -11491,37 +11454,45 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
       };
       const meta=tabMeta[tab]||tabMeta.gd;
       const tabs=`<nav class="pr-tabs" aria-label="Placement preparation sections">${Object.keys(tabMeta).map(k=>`<button class="pr-tab ${tab===k?'active':''}" aria-pressed="${tab===k}" onclick="prSwitchTab('${k}')"><span class="pr-tab-num">${tabMeta[k].num}</span><span>${tabMeta[k].label}</span></button>`).join('')}</nav>`;
-      const kpis=`<div class="pr-kpis"><div class="pr-kpi"><b>${manual.length}</b><span>Manual resources published</span></div><div class="pr-kpi"><b>${latest?'1':'0'}</b><span>Published daily pack</span></div><div class="pr-kpi"><b>${dn.size+manualDn.size}</b><span>Completed items</span></div></div>`;
+      const kpis=`<div class="pr-kpis"><div class="pr-kpi"><b>${manual.length}</b><span>Manual resources published</span></div><div class="pr-kpi"><b>${latest?'1':'0'}</b><span>Published daily pack</span></div><div class="pr-kpi"><b>${dn.size}</b><span>Completed packs</span></div></div>`;
       const resources=manual.filter(t=>t.details?.content_type===tab);
-      const resourceCards=resources.map((t,i)=>`<article class="pr-card"><span class="pr-tag">📄 ${escPR(t.source_deck||'Imported PDF')}</span><h3>${escPR(t.topic)}</h3><p class="pr-muted">Published ${escPR(new Date(t.created_at).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}))}</p><div class="pr-resource-text">${prFormatText(t.details?.content_text)}</div><div class="pr-actions"><button class="btn btn-sm" onclick="prToggleManualBookmark('${t.id}',${manualBm.has(t.id)})">${manualBm.has(t.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleManualComplete('${t.id}',${manualDn.has(t.id)})">${manualDn.has(t.id)?'✓ Completed':'Mark complete'}</button>${CURRENT_USER?.role==='admin'?`<button class="btn btn-sm" onclick="prDeleteResource('${t.id}')">Delete resource</button>`:''}</div><p class="pr-muted">Bookmark and completion status are saved in this browser for your signed-in account.</p></article>`).join('');
+      const resourceCards=resources.map(t=>prRenderImportedResource(t,tab)).join('');
       let featured='';
       if(tab==='gd'&&latest){
         const d=latest.gd_topic||{};
         const points=[...(d.arguments_for||[]).slice(0,2),...(d.solutions||[]).slice(0,2)];
         const pillsHtml=['Farmer economics','Evidence & efficacy','Adoption','Scalable solutions'].map(x=>'<span class="pr-pill">'+x+'</span>').join('');
         const followupsHtml=(d.follow_up_questions||[]).length?'<h4>Likely follow-up questions</h4><ul>'+listPR(d.follow_up_questions)+'</ul>':'';
-        const takeawayItems=arrPR(d.key_takeaways).length?arrPR(d.key_takeaways):points;
-        const takeawaysHtml=prTakeaway(takeawayItems);
-        featured=`<div class="pr-layout"><div><article class="pr-card"><span class="pr-tag">✦ FEATURED DISCUSSION</span><h3>${escPR(d.title||'Group Discussion Topic')}</h3><p class="pr-lead">${escPR(d.context||'Use this topic to practise a structured, evidence-led discussion.')}</p><div class="pr-pill-row">${pillsHtml}</div><h4>Opening statement</h4><div class="pr-highlight">${prFormatText(d.opening_statement)}</div><h4>Arguments to use</h4><div class="pr-step"><div class="pr-step-num">A</div><div><h4>Supporting view</h4><ul>${listPR(d.arguments_for)}</ul></div></div><div class="pr-step"><div class="pr-step-num">B</div><div><h4>Counterarguments</h4><ul>${listPR(d.arguments_against)}</ul></div></div><h4>Solution framework</h4><ul>${listPR(d.solutions)}</ul><h4>Conclusion to land</h4><div class="pr-highlight">${prFormatText(d.conclusion)}</div>${followupsHtml}<div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${latest.id}',${bm.has(latest.id)})">${bm.has(latest.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${latest.id}',${dn.has(latest.id)})">${dn.has(latest.id)?'✓ Completed':'Mark complete'}</button></div></article></div><aside><div class="pr-side-card"><h4>Key takeaways</h4>${takeawaysHtml}</div><div class="pr-card"><span class="pr-tag">⚡ 2-MINUTE REVISION</span><h3>Before you speak</h3><div class="pr-step"><div class="pr-step-num">1</div><div><h4>Define the debate</h4><p>Frame the issue in one balanced sentence.</p></div></div><div class="pr-step"><div class="pr-step-num">2</div><div><h4>Support with evidence</h4><p>Use a concrete example or reliable statistic.</p></div></div><div class="pr-step"><div class="pr-step-num">3</div><div><h4>Offer a solution</h4><p>Connect commercial viability with farmer outcomes.</p></div></div></div></aside></div>`;
+        const takeawaysHtml=prTakeaway(arrPR(d.takeaways).length?arrPR(d.takeaways):points);
+        featured=`<div class="pr-layout"><div><article class="pr-card"><span class="pr-tag">✦ FEATURED DISCUSSION</span><h3>${escPR(d.title||'Group Discussion Topic')}</h3><p class="pr-lead">${escPR(d.context||'Use this topic to practise a structured, evidence-led discussion.')}</p><div class="pr-pill-row">${pillsHtml}</div><h4>Opening statement</h4><div class="pr-highlight">${prFormatText(d.opening_statement)}</div><h4>Arguments to use</h4><div class="pr-step"><div class="pr-step-num">A</div><div><h4>Supporting view</h4><ul>${listPR(d.arguments_for)}</ul></div></div><div class="pr-step"><div class="pr-step-num">B</div><div><h4>Counterarguments</h4><ul>${listPR(d.arguments_against)}</ul></div></div><h4>Solution framework</h4><ul>${listPR(d.solutions)}</ul><h4>Conclusion to land</h4><div class="pr-highlight">${prFormatText(d.conclusion)}</div>${followupsHtml}<div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${latest.id}',${bm.has(latest.id)})">${bm.has(latest.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${latest.id}',${dn.has(latest.id)})">${dn.has(latest.id)?'✓ Completed':'Mark complete'}</button>${CURRENT_USER?.role==='admin'?`<button class="btn btn-sm" onclick="prDeletePack('${latest.id}')">Delete old pack</button>`:''}</div></article></div><aside><div class="pr-side-card"><h4>Key takeaways</h4>${takeawaysHtml}</div><div class="pr-card"><span class="pr-tag">⚡ 2-MINUTE REVISION</span><h3>Before you speak</h3><div class="pr-step"><div class="pr-step-num">1</div><div><h4>Define the debate</h4><p>Frame the issue in one balanced sentence.</p></div></div><div class="pr-step"><div class="pr-step-num">2</div><div><h4>Support with evidence</h4><p>Use a concrete example or reliable statistic.</p></div></div><div class="pr-step"><div class="pr-step-num">3</div><div><h4>Offer a solution</h4><p>Connect commercial viability with farmer outcomes.</p></div></div></div></aside></div>`;
       } else if(tab==='guesstimate'&&latest){
         const g=latest.guesstimate||{};
-        featured=`<div class="pr-layout"><div><article class="pr-card"><span class="pr-tag">∑ SOLVED GUESSTIMATE</span><h3>${escPR(g.question||'Guesstimate challenge')}</h3><p class="pr-lead">Make your assumptions explicit, show the logic and sanity-check the final number.</p><h4>1 · Approach</h4><div class="pr-highlight">${prFormatText(g.approach)}</div><h4>2 · Assumptions</h4><ul>${listPR(g.assumptions)}</ul><h4>3 · Calculation, step by step</h4><ol>${listPR(g.calculation_steps)}</ol><h4>4 · Sanity check</h4><p>${escPR(g.sanity_check||'Compare the result with a reasonable real-world range.')}</p><h4>5 · Interview-ready explanation</h4><div class="pr-highlight">${prFormatText(g.interview_explanation)}</div><div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${latest.id}',${bm.has(latest.id)})">${bm.has(latest.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${latest.id}',${dn.has(latest.id)})">${dn.has(latest.id)?'✓ Completed':'Mark complete'}</button></div></article></div><aside><div class="pr-guesstimate-answer"><small>Final estimate</small><strong>${escPR(g.final_estimate||'Build your estimate from the assumptions above.')}</strong></div><div class="pr-side-card"><h4>Interview formula</h4><p><b>Clarify → Segment → Assume → Calculate → Sanity-check</b></p><p>State units at every step. Explain why your assumptions are reasonable and mention what could move the estimate up or down.</p></div></aside></div>`;
+        featured=`<div class="pr-layout"><div><article class="pr-card"><span class="pr-tag">∑ SOLVED GUESSTIMATE</span><h3>${escPR(g.question||'Guesstimate challenge')}</h3><p class="pr-lead">Make your assumptions explicit, show the logic and sanity-check the final number.</p><h4>1 · Approach</h4><div class="pr-highlight">${prFormatText(g.approach)}</div><h4>2 · Assumptions</h4><ul>${listPR(g.assumptions)}</ul><h4>3 · Calculation, step by step</h4><ol>${listPR(g.calculation_steps)}</ol><h4>4 · Sanity check</h4><p>${escPR(g.sanity_check||'Compare the result with a reasonable real-world range.')}</p><h4>5 · Interview-ready explanation</h4><div class="pr-highlight">${prFormatText(g.interview_explanation)}</div><div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${latest.id}',${bm.has(latest.id)})">${bm.has(latest.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${latest.id}',${dn.has(latest.id)})">${dn.has(latest.id)?'✓ Completed':'Mark complete'}</button>${CURRENT_USER?.role==='admin'?`<button class="btn btn-sm" onclick="prDeletePack('${latest.id}')">Delete old pack</button>`:''}</div></article></div><aside><div class="pr-guesstimate-answer"><small>Final estimate</small><strong>${escPR(g.final_estimate||'Build your estimate from the assumptions above.')}</strong></div><div class="pr-side-card"><h4>Interview formula</h4><p><b>Clarify → Segment → Assume → Calculate → Sanity-check</b></p><p>State units at every step. Explain why your assumptions are reasonable and mention what could move the estimate up or down.</p></div></aside></div>`;
       } else if(tab==='data_points'&&latest){
         const pts=Array.isArray(latest.data_points)?latest.data_points:[];
-        featured=`<div class="pr-section-head"><div><h3>Facts worth remembering</h3><p>Each figure includes context and its source so you can use it responsibly.</p></div></div><div class="pr-data-grid">${pts.map((d,i)=>{const url=prSafeUrl(d.source_url);return '<article class="pr-data-card"><div class="pr-data-index">DATA POINT '+String(i+1).padStart(2,'0')+' · '+escPR(d.year||'Year n/a')+'</div><h4>'+escPR(d.label||'Agribusiness indicator')+'</h4><div class="pr-data-value">'+escPR(d.figure||'—')+' <span class="pr-data-unit">'+escPR(d.unit||'')+'</span></div><p>'+escPR(d.context||'')+'</p><p><b>Why it matters:</b> '+escPR(d.placement_relevance||'Use this figure to support a specific argument.')+'</p><div class="pr-source">Source: '+(url?'<a href="'+escPR(url)+'" target="_blank" rel="noopener noreferrer">'+escPR(d.source_title||url)+' ↗</a>':escPR(d.source_title||'Source not supplied'))+'</div></article>';}).join('')}</div><p class="pr-muted">Verify the linked source and reference year before quoting a statistic in an interview or GD.</p>`;
+        featured=`<div class="pr-section-head"><div><h3>Facts worth remembering</h3><p>Each figure includes context and its source so you can use it responsibly.</p></div></div><div class="pr-data-grid">${pts.map((d,i)=>{const url=prSafeUrl(d.source_url);return '<article class="pr-data-card"><div class="pr-data-index">DATA POINT '+String(i+1).padStart(2,'0')+' · '+escPR(d.year||'Year n/a')+'</div><h4>'+escPR(d.label||'Agribusiness indicator')+'</h4><div class="pr-data-value">'+escPR(d.figure||'—')+' <span class="pr-data-unit">'+escPR(d.unit||'')+'</span></div><p>'+escPR(d.context||'')+'</p><p><b>Why it matters:</b> '+escPR(d.placement_relevance||'Use this figure to support a specific argument.')+'</p><div class="pr-source">Source: '+(url?'<a href="'+escPR(url)+'" target="_blank" rel="noopener noreferrer">'+escPR(d.source_title||url)+' ↗</a>':escPR(d.source_title||'Source not supplied'))+'</div></article>';}).join('')}</div><p class="pr-muted">Verify the linked source and reference year before quoting a statistic in an interview or GD.</p>${CURRENT_USER?.role==='admin'?`<div class="pr-actions"><button class="btn btn-sm" onclick="prDeletePack('${latest.id}')">Delete old pack</button></div>`:''}`;
       }
       const empty=resources.length===0&&!featured?`<div class="pr-card"><span class="pr-tag">READY FOR YOUR MATERIAL</span><h3>No ${escPR(meta.label)} content published yet</h3><p class="pr-lead">This section is independent. Once the admin imports a PDF and publishes it here, the material will appear in this tab with clear formatting.</p>${CURRENT_USER?.role==='admin'?'<div class="pr-actions"><button class="btn btn-primary" onclick="prOpenPdfImport()">＋ Import a PDF into this section</button></div>':''}</div>`:'';
       const sectionHead=`<div class="pr-section-head"><div><h3>${meta.label}</h3><p>${meta.desc}</p></div>${CURRENT_USER?.role==='admin'?'<button class="btn btn-sm btn-primary" onclick="prOpenPdfImport()">＋ Import PDF</button>':''}</div>`;
       const archive=(packs||[]).filter(p=>p.id!==latest?.id&&p.status==='published');
-      host.innerHTML=kpis+tabs+`<section class="pr-tab-panel">${sectionHead}${featured||''}${resources.length?`<div class="pr-section-head"><div><h3>Published resources</h3><p>Admin-reviewed material from uploaded PDFs.</p></div></div>${resourceCards}`:''}${empty}${tab==='gd'&&archive.length?`<div class="pr-archive"><h3>Previous GD packs</h3>${archive.map(p=>`<details><summary>${escPR(p.content_date)} · ${escPR(p.gd_topic?.title||'Group discussion')}</summary><p>${escPR(p.gd_topic?.context||'')}</p><div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${p.id}',${bm.has(p.id)})">${bm.has(p.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${p.id}',${dn.has(p.id)})">${dn.has(p.id)?'✓ Completed':'Mark complete'}</button></div></details>`).join('')}</div>`:''}</section>`;
+      host.innerHTML=kpis+tabs+`<section class="pr-tab-panel">${sectionHead}${resources.length?`<div class="pr-section-head"><div><h3>Your imported material</h3><p>Structured cards extracted from admin-reviewed PDFs.</p></div></div><div class="pr-imported-list">${resourceCards}</div>`:''}${featured||''}${empty}${tab==='gd'&&archive.length?`<div class="pr-archive"><h3>Previous GD packs</h3>${archive.map(p=>`<details><summary>${escPR(p.content_date)} · ${escPR(p.gd_topic?.title||'Group discussion')}</summary><p>${escPR(p.gd_topic?.context||'')}</p><div class="pr-actions"><button class="btn btn-sm" onclick="prToggleBookmark('${p.id}',${bm.has(p.id)})">${bm.has(p.id)?'★ Bookmarked':'☆ Bookmark'}</button><button class="btn btn-sm" onclick="prToggleComplete('${p.id}',${dn.has(p.id)})">${dn.has(p.id)?'✓ Completed':'Mark complete'}</button>${CURRENT_USER?.role==='admin'?`<button class="btn btn-sm" onclick="prDeletePack('${p.id}')">Delete old pack</button>`:''}</div></details>`).join('')}</div>`:''}</section>`;
     }catch(e){console.error('Placement Readiness load failed',e);host.innerHTML='<div class="pr-status pr-error">Could not load Placement Readiness. Check the placement table policies and Supabase connection.</div>';}
   }
   window.prDeleteResource=async function(id){
     if(typeof requireAdmin==='function'&&!requireAdmin())return;
-    if(!confirm('Delete this imported placement resource? This cannot be undone.'))return;
-    const {error}=await window.supabaseClient.from('placement_topic_bank').delete().eq('id',id);
+    if(!confirm('Delete this imported placement PDF and all its displayed content? This cannot be undone.'))return;
+    const sb=window.supabaseClient;if(!sb){toast('Supabase connection unavailable.');return;}
+    const {error}=await sb.from('placement_topic_bank').delete().eq('id',id);
     if(error){console.error(error);toast('Could not delete resource: '+error.message);return;}
-    toast('Resource deleted.');loadPlacementReadiness();
+    toast('Imported placement PDF deleted.');loadPlacementReadiness();
+  };
+  window.prDeletePack=async function(id){
+    if(typeof requireAdmin==='function'&&!requireAdmin())return;
+    if(!id||!confirm('Delete this older fixed daily pack? This removes the pack record from Placement Readiness.'))return;
+    const sb=window.supabaseClient;if(!sb){toast('Supabase connection unavailable.');return;}
+    const {error}=await sb.from('placement_daily_packs').delete().eq('id',id);
+    if(error){console.error('Could not delete legacy placement pack:',error);toast('Could not delete old pack: '+error.message+' (The database may have a relationship or RLS rule blocking deletion.)');return;}
+    toast('Old placement pack deleted.');loadPlacementReadiness();
   };
 })();
 </script>
@@ -13302,16 +13273,19 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
     lastLoad=Date.now();
     if(state!=='ready')state='loading';
     try{
-      var r=await c.from('confession_posts').select('id,body,tone,is_hidden,created_at').order('created_at',{ascending:false}).limit(150);
-      if(r.error){var m=(r.error.message||'')+(r.error.code||'');state=/42P01|does not exist|schema cache|Could not find the table/i.test(m)?'setup':'error';err=r.error.message||'';return;}
-      var rows=(r.data||[]).slice().reverse();
+      var rows=[];
       MINE={};AUTH={};
       if(isAdmin()){
-        if(rows.length){var a=await c.from('confession_authors').select('post_id,author_name,author_roll').in('post_id',rows.map(function(p){return p.id;}));
-          if(!a.error&&Array.isArray(a.data))a.data.forEach(function(x){AUTH[x.post_id]=x;});}
+        /* Admin gets metadata only: never request confession body or author identity. */
+        var q=await c.rpc('admin_confession_moderation_queue');
+        if(q.error){state='error';err='Anonymous moderation is not available yet. Please verify the Supabase moderation functions.';return;}
+        rows=(q.data||[]).map(function(p){return {id:p.post_id,body:'[Message content hidden for privacy]',tone:p.tone,is_hidden:p.is_hidden,created_at:p.posted_at};}).reverse();
       }else{
-        var q=await c.rpc('my_confession_ids');
-        if(!q.error&&Array.isArray(q.data))q.data.forEach(function(x){var id=(x&&typeof x==='object')?Object.values(x)[0]:x;if(id)MINE[id]=1;});
+        var r=await c.from('confession_posts').select('id,body,tone,is_hidden,created_at').order('created_at',{ascending:false}).limit(150);
+        if(r.error){var m=(r.error.message||'')+(r.error.code||'');state=/42P01|does not exist|schema cache|Could not find the table/i.test(m)?'setup':'error';err=r.error.message||'';return;}
+        rows=(r.data||[]).slice().reverse();
+        var mine=await c.rpc('my_confession_ids');
+        if(!mine.error&&Array.isArray(mine.data))mine.data.forEach(function(x){var id=(x&&typeof x==='object')?Object.values(x)[0]:x;if(id)MINE[id]=1;});
       }
       POSTS=rows;state='ready';err='';listen();
     }catch(e){state='error';err=e&&e.message||String(e);}
@@ -13340,9 +13314,9 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
     var h='<div class="cf-msg tone-'+((p.tone|0)%6)+(mine?' mine':'')+(p.is_hidden?' is-hidden':'')+'" data-id="'+E(p.id)+'">'+
       '<div class="cf-av">'+ic('eye-off')+'</div><div class="cf-bubble">'+
       '<div class="cf-meta"><b>'+(mine?'You':'Anonymous')+'</b><span>'+timeLabel(p.created_at)+'</span>'+(p.is_hidden?'<em class="cf-tag">Hidden from students</em>':'')+'</div>'+
-      '<div class="cf-body">'+E(p.body)+'</div>';
+      '<div class="cf-body">'+(ad?'Message content is hidden from administrators to protect anonymity.':E(p.body))+'</div>';
     if(ad){
-      h+='<div class="cf-admin"><span class="cf-who">'+ic('user')+'<b>'+E(a&&a.author_name||'Unknown')+'</b>'+(a&&a.author_roll?' · Roll '+E(a.author_roll):'')+'</span>'+
+      h+='<div class="cf-admin"><span class="cf-who">'+ic('shield')+'<b>Anonymous moderation</b></span>'+
          '<span class="cf-acts"><button type="button" class="cf-link" onclick="uxConfHide(\''+E(p.id)+'\','+(p.is_hidden?'false':'true')+')">'+(p.is_hidden?'Unhide':'Hide')+'</button>'+
          '<button type="button" class="cf-link danger" onclick="uxConfDelete(\''+E(p.id)+'\')">Delete</button></span></div>';
     }else if(mine){
@@ -13378,7 +13352,7 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
     if(state==='setup')return head+setupCard();
     if(state==='error')return head+'<div class="empty">Could not open the room. '+E(err)+'<br><button type="button" class="btn btn-sm" onclick="uxConfRetry()">Try again</button></div>';
     var note=ad
-      ? '<div class="cf-note">'+ic('shield')+'<span>Students are told their name is hidden from other students but that the Academic Committee can identify a post if it breaks the community rules. <b id="cfCount2">'+POSTS.length+' messages</b></span></div>'
+      ? '<div class="cf-note">'+ic('shield')+'<span>Admins can moderate posts without seeing message content or sender identity. <b id="cfCount2">'+POSTS.length+' messages</b></span></div>'
       : '<div class="cf-note">'+ic('shield')+'<span><b>Anonymous to other students.</b> Be kind and respectful. The Academic Committee can identify a post only if it breaks the community rules.</span></div>';
     var body='<div class="cf-wrap">'+head+note+'<div id="cfFeed" class="cf-feed">'+(state==='ready'?feedHTML():'<div class="empty ux-loading">Opening the room\u2026</div>')+'</div>';
     if(!ad){
@@ -13429,14 +13403,14 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
   };
   window.uxConfHide=async function(id,hide){
     if(!isAdmin())return;
-    var r=await sb().from('confession_posts').update({is_hidden:!!hide}).eq('id',id).select('id');
-    if(r.error||!r.data||!r.data.length){toast('Could not update: '+(r.error?r.error.message:'permission rule refused it'));return;}
+    var r=await sb().rpc('admin_hide_confession',{p_post_id:id,p_hide:!!hide});
+    if(r.error||r.data!==true){toast('Could not update: '+(r.error?r.error.message:'permission rule refused it'));return;}
     toast(hide?'Hidden from students':'Visible to students again');refresh();
   };
   window.uxConfDelete=async function(id){
-    if(!isAdmin()||!confirm('Delete this message permanently?'))return;
-    var r=await sb().from('confession_posts').delete().eq('id',id).select('id');
-    if(r.error||!r.data||!r.data.length){toast('Could not delete: '+(r.error?r.error.message:'permission rule refused it'));return;}
+    if(!isAdmin()||!confirm('Delete this anonymous message permanently?'))return;
+    var r=await sb().rpc('admin_delete_confession',{p_post_id:id});
+    if(r.error||r.data!==true){toast('Could not delete: '+(r.error?r.error.message:'permission rule refused it'));return;}
     toast('Message deleted');refresh();
   };
   window.uxConfRefresh=refresh;
