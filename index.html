@@ -800,6 +800,7 @@ function buildAttendanceMessage(rec){
 /* ================= RENDER: ROUTER ================= */
 function setTab(tab){
   if(CURRENT_USER?.role==='student' && ['database','history','settings'].includes(tab)){ toast('This section is restricted to the Academic Committee administrator.'); return; }
+  if(tab === 'home'){ ACADEMIC_VIEW = 'dashboard'; }
   TAB = tab;
   const moreGroup = ['home','academics','database','history','settings','accounts','more','polls','confess','ace'];
   document.querySelectorAll('.bottomnav button').forEach(b=>{
@@ -828,6 +829,14 @@ function render(){
   else if(TAB==='confess') el.innerHTML = (typeof renderConfessRoot==='function') ? renderConfessRoot() : '';
   else if(TAB==='ace') el.innerHTML = (typeof renderAceRoot==='function') ? renderAceRoot() : '<div class="empty">ACADCOM ACE is loading.</div>';
   else if(TAB==='placement') el.innerHTML = renderPlacementReadiness();
+
+  // Persistent, predictable route back to the real Home dashboard.
+  const isHomeDashboard = TAB==='home' || (TAB==='academics' && ACADEMIC_VIEW==='dashboard');
+  const oldHomeBar = document.getElementById('acadcom-global-homebar');
+  if(oldHomeBar) oldHomeBar.remove();
+  if(!isHomeDashboard){
+    el.insertAdjacentHTML('afterbegin', '<div id="acadcom-global-homebar" class="acadcom-global-homebar"><button type="button" onclick="setTab(\'home\')" aria-label="Go back to Home dashboard">← Go back to Dashboard</button></div>');
+  }
   bindScreenEvents();
 }
 function backToMoreLink(){
@@ -1552,7 +1561,8 @@ function takeAttendanceFromSession(sessionId, slotNo){
     presentIds: new Set()
   };
   initAttPresentAll();
-  render();
+  // Route away from Schedule and open the actual attendance checklist.
+  setTab('attendance');
 }
 function to12h(t){
   if(!t) return '';
@@ -11497,6 +11507,22 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
 })();
 </script>
 
+
+<style id="acadcom-global-home-navigation-fix">
+.acadcom-global-homebar{
+  display:flex;align-items:center;margin:0 0 14px;padding:0;
+}
+.acadcom-global-homebar button{
+  display:inline-flex;align-items:center;gap:8px;
+  min-height:38px;padding:9px 14px;border:1px solid var(--rule,#dbe2ee);
+  border-radius:10px;background:var(--surface,#fff);color:var(--seal,#1f3c88);
+  font:700 13px/1.2 var(--sans,system-ui,sans-serif);cursor:pointer;
+  box-shadow:0 1px 2px rgba(15,23,42,.04);transition:background .15s ease,transform .15s ease;
+}
+.acadcom-global-homebar button:hover{background:var(--seal-tint,#e9eefb);transform:translateY(-1px)}
+.acadcom-global-homebar button:focus-visible{outline:3px solid rgba(58,98,216,.3);outline-offset:2px}
+</style>
+
 </body>
 <script>
 /* ============================================================
@@ -14014,10 +14040,28 @@ div:has(> .session-card){display:grid;grid-template-columns:1fr;gap:0;}
       const pl = planOf(p); if (!pl.payload.length) continue;
       try {
         const key = await ACX.batchKey(pl.payload, p.mapping.subjectId);
-        const { data, error } = await sb().rpc('acadcom_import_attendance', { p_rows: pl.payload, p_batch_key: key, p_file_name: p.name, p_reason: reason });
+        let { data, error } = await sb().rpc('acadcom_import_attendance', { p_rows: pl.payload, p_batch_key: key, p_file_name: p.name, p_reason: reason });
         if (error) throw error;
+
+        /*
+         * A prior import's batch marker can outlive its attendance rows (for
+         * example, an admin intentionally cleared a subject's attendance).
+         * In that case the preview has already established that these rows are
+         * missing from current HISTORY, but the deterministic batch key makes
+         * the RPC return already_imported without restoring them. Retry once
+         * with a fresh batch key. The database RPC remains responsible for
+         * duplicate/conflict checks, so existing rows are not blindly added.
+         */
+        if (data && data.status === 'already_imported') {
+          const retryKey = await ACX.sha256(`${key}\nreconcile:${Date.now()}:${Math.random().toString(36).slice(2)}`);
+          const retry = await sb().rpc('acadcom_import_attendance', { p_rows: pl.payload, p_batch_key: retryKey, p_file_name: p.name, p_reason: `${reason} (safe re-import)` });
+          if (retry.error) throw retry.error;
+          data = retry.data;
+        }
         const ok = data.status === 'committed' || data.status === 'already_imported' || data.status === 'nothing_imported';
-        p.result = { ok, msg: data.status === 'already_imported' ? 'This exact file was already imported — nothing changed.' : `Imported ${data.inserted}, skipped ${data.skipped_duplicate} duplicates, ${data.conflicts} conflicts, ${data.invalid} invalid.` };
+        p.result = { ok, msg: data.status === 'already_imported'
+          ? 'This exact file is already registered and the safe re-import was also blocked. Check the database import function and unique constraints.'
+          : `Imported ${data.inserted || 0}, skipped ${data.skipped_duplicate || 0} duplicates, ${data.conflicts || 0} conflicts, ${data.invalid || 0} invalid.` };
       } catch (e) { p.result = { ok: false, msg: 'FAILED — nothing from this file was saved. ' + rpcErr(e) }; }
     }
     S.running = false;
