@@ -1,25 +1,9 @@
 
-name: Supabase Health Check
-
-on:
-  schedule:
-    # Daily at 07:00 IST (01:30 UTC)
-    - cron: "30 1 * * *"
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  health-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-
-    steps:
       - name: Check Supabase REST API
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        shell: bash
         run: |
           set -eu
 
@@ -28,18 +12,18 @@ jobs:
             exit 1
           fi
 
-          status=$(curl -sS -o /tmp/supabase-response.json \
+          status=$(curl -sS \
+            -o /tmp/supabase-response.json \
             -w "%{http_code}" \
             --max-time 30 \
-           "$SUPABASE_URL/auth/v1/health" \
-          
+            "$SUPABASE_URL/auth/v1/health" \
             -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
 
-          echo "Supabase REST API HTTP status: $status"
+          echo "Supabase Auth health endpoint HTTP status: $status"
 
           if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-            echo "Supabase REST API health check failed."
+            echo "Supabase health check failed."
             exit 1
           fi
 
-          echo "Supabase REST API responded successfully."
+          echo "Supabase Auth health endpoint responded successfully."
