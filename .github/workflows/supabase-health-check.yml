@@ -43,3 +43,29 @@ jobs:
           fi
 
           echo "Supabase Auth health endpoint responded successfully."
+
+          
+      - name: Test read-only database activity
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        shell: bash
+        run: |
+          set -eu
+
+          status=$(curl -sS \
+            -o /tmp/database-response.json \
+            -w "%{http_code}" \
+            --max-time 30 \
+            "$SUPABASE_URL/rest/v1/subjects?select=id&limit=1" \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY")
+
+          echo "Read-only database request HTTP status: $status"
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Database request failed. Check permissions before proceeding."
+            exit 1
+          fi
+
+          echo "Read-only database request succeeded."
+
