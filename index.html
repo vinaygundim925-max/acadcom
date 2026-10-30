@@ -345,6 +345,23 @@ return this.parent.children[i-1]},XMLNode.prototype.next=function(){var i;if(i=t
 }
 </style>
 
+
+<style id="placement-notes-analytics-css">
+.placement-note-download{border:1px solid #d6b66d;background:#fff9e9;color:#785719;border-radius:10px;padding:9px 12px;font-weight:800;cursor:pointer}
+.placement-notes-admin-actions{display:flex;gap:8px;flex-wrap:wrap}
+.placement-notes-analytics-btn{border:1px solid #d6b66d;background:#fff8e6;color:#785719;border-radius:10px;padding:10px 13px;font-weight:800;cursor:pointer}
+.placement-notes-analytics{margin:12px 0 18px;padding:16px;border:1px solid #e5d4a8;border-radius:16px;background:var(--card,#fff)}
+.placement-analytics-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.placement-analytics-heading small,.placement-analytics-row small,.placement-analytics-summary small{display:block;color:var(--muted,#667085);font-size:12px;margin-top:3px}
+.placement-analytics-heading button{border:0;background:transparent;font-size:18px;cursor:pointer}
+.placement-analytics-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:14px}
+.placement-analytics-summary>div{padding:12px;border-radius:12px;background:#fff8e8;color:#76551b}
+.placement-analytics-summary b{font-size:22px;display:block}
+.placement-analytics-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-top:1px solid var(--border,#eee);font-size:13px}
+.placement-analytics-row>div{min-width:0;flex:1}.placement-analytics-row b{display:block;overflow-wrap:anywhere}
+@media(max-width:600px){.placement-analytics-row{align-items:flex-start;flex-direction:column}.placement-analytics-summary{grid-template-columns:1fr 1fr}.placement-notes-admin-actions{width:100%}}
+</style>
+
 </head>
 <body data-theme="light">
 <div id="uxIntro" role="presentation" aria-label="MANAGE Academic Committee intro">
@@ -948,6 +965,15 @@ function placementNoteDate(value){
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? 'Recently added' : d.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
 }
+// Frontend-only illustrative display count; never used by admin analytics or Supabase.
+window.PLACEMENT_NOTE_DISPLAY_COUNTS = window.PLACEMENT_NOTE_DISPLAY_COUNTS || {};
+function placementNoteDisplayCount(resourceId){
+  const key=String(resourceId||'');
+  if(!Object.prototype.hasOwnProperty.call(window.PLACEMENT_NOTE_DISPLAY_COUNTS,key)){
+    window.PLACEMENT_NOTE_DISPLAY_COUNTS[key]=30+Math.floor(Math.random()*31);
+  }
+  return window.PLACEMENT_NOTE_DISPLAY_COUNTS[key];
+}
 function renderPlacementNotes(){
   const isAdmin = CURRENT_USER?.role === 'admin';
   const all = (Array.isArray(window.SUPABASE_RESOURCES) ? window.SUPABASE_RESOURCES : [])
@@ -978,7 +1004,7 @@ function renderPlacementNotes(){
           ${categories.map(c=>`<option value="${esc(c)}" ${category===c?'selected':''}>${c==='All'?'All categories':c}</option>`).join('')}
         </select>
       </div>
-      ${isAdmin ? `<div class="placement-notes-admin-card"><div class="placement-notes-admin-icon">＋</div><div class="placement-notes-admin-copy"><b>Add placement material</b><span>Upload a PDF, PPT, Word document or spreadsheet for students.</span></div><button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload notes</button></div>` : ''}
+      ${isAdmin ? `<div class="placement-notes-admin-card"><div class="placement-notes-admin-icon">＋</div><div class="placement-notes-admin-copy"><b>Add placement material</b><span>Upload a PDF, PPT, Word document or spreadsheet for students.</span></div><div class="placement-notes-admin-actions"><button class="placement-notes-analytics-btn" onclick="togglePlacementNotesAnalytics()">↗ Usage analytics</button><button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload notes</button></div></div><div id="placementNotesAnalytics" class="placement-notes-analytics" hidden></div>` : ''}
       <div id="placementNotesList" class="placement-notes-list">
         ${filtered.length ? filtered.map(r=>{
           const meta=placementNoteMeta(r);
@@ -986,14 +1012,42 @@ function renderPlacementNotes(){
           const icon=/pdf/.test(ext)?'PDF':/ppt/.test(ext)?'PPT':/doc/.test(ext)?'DOC':/xls/.test(ext)?'XLS':'FILE';
           return `<article class="placement-note-card">
             <div class="placement-note-filetype">${icon}</div>
-            <div class="placement-note-content"><div class="placement-note-tags"><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span></div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div>
-            <div class="placement-note-actions"><button class="placement-note-open" onclick="openSupabaseResource('${escId(r.id)}')">Open <span>↗</span></button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div>
+            <div class="placement-note-content"><div class="placement-note-tags"><span class="placement-note-important">★ IMPORTANT</span><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span>${!isAdmin?`<span class="placement-note-demo-count">${placementNoteDisplayCount(r.id)} downloaded · illustrative</span>`:''}</div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div>
+            <div class="placement-note-actions"><button class="placement-note-download" onclick="openSupabaseResource('${escId(r.id)}','download')">Download ↓</button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div>
           </article>`;
         }).join('') : `<div class="placement-notes-empty"><div class="placement-notes-empty-icon">📚</div><h3>${all.length?'No matching notes':'Your placement library starts here'}</h3><p>${all.length?'Try another search or category.':(isAdmin?'Upload the first placement resource to make it available to students.':'Placement notes uploaded by the Academic Committee will appear here.')}</p>${isAdmin && !all.length?`<button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload first resource</button>`:''}</div>`}
       </div>
-      <p class="placement-notes-footnote">Keep files clearly titled so everyone can find the right material quickly.</p>
+      <p class="placement-notes-footnote">Select Download to access a resource. Download activity is recorded for admin analytics.</p>
     </section>`;
 }
+window.togglePlacementNotesAnalytics = async function(){
+  if(CURRENT_USER?.role!=='admin'){toast('Admin access required.');return;}
+  const host=document.getElementById('placementNotesAnalytics');
+  if(!host) return;
+  if(!host.hidden){host.hidden=true;return;}
+  host.hidden=false;
+  host.innerHTML='<p class="placement-notes-analytics-loading">Loading placement usage…</p>';
+  try{
+    const {data,error}=await window.supabaseClient.from('placement_note_events')
+      .select('resource_id,user_id,event_type,created_at').order('created_at',{ascending:false});
+    if(error) throw error;
+    const notes=(window.SUPABASE_RESOURCES||[]).filter(isPlacementNoteResource);
+    const rows=data||[];
+    const cards=notes.map(note=>{
+      const events=rows.filter(e=>String(e.resource_id)===String(note.id));
+      const downloads=events.filter(e=>e.event_type==='download').length;
+      const students=new Set(events.map(e=>e.user_id).filter(Boolean)).size;
+      return `<div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${students} unique student accounts</small></div><span>↓ ${downloads} downloads</span></div>`;
+    }).join('');
+    const totalDownloads=rows.filter(e=>e.event_type==='download').length;
+    const totalStudents=new Set(rows.map(e=>e.user_id).filter(Boolean)).size;
+    host.innerHTML=`<div class="placement-analytics-heading"><div><b>Placement Notes Analytics</b><small>Usage based on signed-in accounts</small></div><button onclick="togglePlacementNotesAnalytics()" aria-label="Close analytics">✕</button></div><div class="placement-analytics-summary"><div><b>${totalDownloads}</b><small>Total downloads</small></div><div><b>${totalStudents}</b><small>Unique students</small></div></div>${cards||'<p>No placement notes available yet.</p>'}`;
+  }catch(err){
+    console.error('Placement notes analytics load failed:',err);
+    host.innerHTML='<p>Analytics are not configured yet. Apply the supplied SQL setup, then refresh.</p>';
+  }
+};
+
 window.placementNotesRefreshList = function(){
   const input = document.getElementById('placementNotesSearch');
   const value = input ? input.value : '';
@@ -1015,7 +1069,7 @@ window.placementNotesRefreshList = function(){
   host.innerHTML = filtered.length ? filtered.map(r=>{
     const meta=placementNoteMeta(r), ext=String(r.title||'').toLowerCase().split('.').pop();
     const icon=/pdf/.test(ext)?'PDF':/ppt/.test(ext)?'PPT':/doc/.test(ext)?'DOC':/xls/.test(ext)?'XLS':'FILE';
-    return `<article class="placement-note-card"><div class="placement-note-filetype">${icon}</div><div class="placement-note-content"><div class="placement-note-tags"><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span></div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div><div class="placement-note-actions"><button class="placement-note-open" onclick="openSupabaseResource('${escId(r.id)}')">Open <span>↗</span></button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div></article>`;
+    return `<article class="placement-note-card"><div class="placement-note-filetype">${icon}</div><div class="placement-note-content"><div class="placement-note-tags"><span class="placement-note-important">★ IMPORTANT</span><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span>${!isAdmin?`<span class="placement-note-demo-count">${placementNoteDisplayCount(r.id)} downloaded · illustrative</span>`:''}</div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div><div class="placement-note-actions"><button class="placement-note-download" onclick="openSupabaseResource('${escId(r.id)}','download')">Download ↓</button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div></article>`;
   }).join('') : `<div class="placement-notes-empty"><div class="placement-notes-empty-icon">📚</div><h3>${all.length?'No matching notes':'Your placement library starts here'}</h3><p>${all.length?'Try another search or category.':(isAdmin?'Upload the first placement resource to make it available to students.':'Placement notes uploaded by the Academic Committee will appear here.')}</p>${isAdmin&&!all.length?`<button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload first resource</button>`:''}</div>`;
   if(active && input) input.focus();
 };
@@ -6991,23 +7045,28 @@ async function saveSupabaseResource() {
    OPEN RESOURCE
    ========================================================= */
 
-function openSupabaseResource(id) {
+function openSupabaseResource(id, eventType='download') {
+  const resource = (window.SUPABASE_RESOURCES || []).find(r => String(r.id) === String(id));
+  if (!resource) { toast('Resource not found.'); return; }
+  if (!resource.file_url) { toast('No resource link has been added.'); return; }
 
-  const resource =
-    (window.SUPABASE_RESOURCES || [])
-      .find(r => String(r.id) === String(id));
-
-  if (!resource) {
-    toast('Resource not found.');
-    return;
+  // Open synchronously to avoid browser popup blockers; record analytics in the background.
+  window.open(resource.file_url, '_blank', 'noopener');
+  if (isPlacementNoteResource(resource)) {
+    (async () => {
+      try {
+        const sb = window.supabaseClient;
+        const { data: { user } = {} } = await sb.auth.getUser();
+        if (!user) return;
+        const { error } = await sb.from('placement_note_events').insert({
+          resource_id: resource.id,
+          user_id: user.id,
+          event_type: eventType === 'download' ? 'download' : 'view'
+        });
+        if (error) console.warn('Placement note analytics event was not saved:', error.message);
+      } catch (err) { console.warn('Placement note analytics unavailable:', err); }
+    })();
   }
-
-  if (!resource.file_url) {
-    toast('No resource link has been added.');
-    return;
-  }
-
-  window.open(resource.file_url, '_blank');
 }
 
 
@@ -11712,7 +11771,7 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
 .placement-notes-hero-top{display:flex;justify-content:space-between;align-items:center}.placement-notes-pill{border:1px solid rgba(255,220,135,.42);background:rgba(255,223,146,.12);color:#ffe4a0;border-radius:999px;padding:6px 10px;font-size:10px;font-weight:900;letter-spacing:.1em}.placement-notes-hero-mark{font-size:34px;color:#f6d178;line-height:1}.placement-notes-eyebrow{margin-top:19px;color:#f3d78e;font-size:10px;font-weight:900;letter-spacing:.18em}.placement-notes-hero h2{font-size:clamp(26px,5vw,36px);line-height:1.1;margin:7px 0 9px;color:#fff;letter-spacing:-.04em}.placement-notes-hero p{font-size:13px;line-height:1.65;max-width:600px;color:#f5e8c7;margin:0}.placement-notes-hero-stats{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:18px;color:#f7e9c4;font-size:11px}.placement-notes-hero-stats b{color:#fff;font-size:16px}
 .placement-notes-toolbar{display:grid;grid-template-columns:minmax(0,1fr) 190px;gap:9px}.placement-notes-search{display:flex;align-items:center;gap:8px;min-width:0;border:1px solid var(--line,#e2e6ed);border-radius:13px;padding:0 12px;background:var(--card,#fff)}.placement-notes-search span{font-size:22px;color:#98701d}.placement-notes-search input{border:0!important;outline:none!important;box-shadow:none!important;width:100%;min-width:0;padding:12px 0;background:transparent;color:var(--ink,#202633)}.placement-notes-filter{min-width:0;border:1px solid var(--line,#e2e6ed);border-radius:13px;padding:0 10px;background:var(--card,#fff);color:var(--ink,#202633)}
 .placement-notes-admin-card{display:flex;align-items:center;gap:12px;border:1px dashed #d8ac43;background:linear-gradient(120deg,rgba(245,195,73,.13),rgba(255,255,255,.7));border-radius:16px;padding:14px}.placement-notes-admin-icon{display:grid;place-items:center;width:40px;height:40px;flex:0 0 40px;border-radius:12px;background:#f5df9f;color:#69470b;font-size:25px}.placement-notes-admin-copy{flex:1;min-width:0}.placement-notes-admin-copy b{display:block;font-size:13px;color:var(--ink,#202633)}.placement-notes-admin-copy span{display:block;font-size:11px;color:var(--muted,#667085);line-height:1.5;margin-top:3px}.placement-notes-upload-btn{border:0;border-radius:11px;background:#a8710b;color:white;font-size:12px;font-weight:850;padding:11px 13px;cursor:pointer;white-space:nowrap}.placement-notes-upload-btn:hover{background:#855706}
-.placement-notes-list{display:grid;gap:10px}.placement-note-card{display:flex;align-items:center;gap:13px;border:1px solid var(--line,#e5e7eb);border-radius:16px;padding:14px;background:var(--card,#fff);box-shadow:0 3px 12px rgba(25,35,55,.035);min-width:0}.placement-note-filetype{width:48px;height:54px;flex:0 0 48px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(145deg,#fff0bd,#f8dfa0);color:#80540a;font-size:11px;font-weight:950;letter-spacing:.04em;border:1px solid #f0d17c}.placement-note-content{flex:1;min-width:0}.placement-note-tags{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:5px}.placement-note-tags span{font-size:9px;font-weight:800;color:#8c6415;background:#fff5d7;border-radius:999px;padding:4px 7px}.placement-note-tags span+span{color:var(--muted,#667085);background:var(--surface,#f4f5f7)}.placement-note-content h3{font-size:14px;line-height:1.4;margin:0;color:var(--ink,#202633);overflow-wrap:anywhere}.placement-note-content p{font-size:11px;line-height:1.5;margin:4px 0 0;color:var(--muted,#667085);overflow-wrap:anywhere}.placement-note-actions{display:flex;flex-direction:column;align-items:stretch;gap:6px;flex:0 0 auto}.placement-note-open{border:0;border-radius:10px;background:#34270e;color:#fff;padding:9px 11px;font-size:11px;font-weight:850;cursor:pointer}.placement-note-open span{color:#f6d178;margin-left:4px}.placement-note-delete{border:0;background:transparent;color:#b42318;font-size:10px;font-weight:800;cursor:pointer;padding:3px}.placement-notes-empty{text-align:center;border:1px dashed #ddc98e;border-radius:17px;padding:28px 18px;background:linear-gradient(135deg,#fffaf0,#fff)}.placement-notes-empty-icon{font-size:32px}.placement-notes-empty h3{margin:9px 0 5px;color:#4c3710;font-size:17px}.placement-notes-empty p{max-width:420px;margin:0 auto 12px;color:#796746;font-size:12px;line-height:1.6}.placement-notes-footnote{text-align:center;color:var(--muted,#667085);font-size:10px;margin:0}
+.placement-note-important{background:#fff0c2!important;color:#80540a!important;border:1px solid #f0d17c;font-weight:950!important;letter-spacing:.04em}.placement-note-demo-count{background:#f2edff!important;color:#6541a5!important;border:1px solid #d9ccf5;font-weight:850!important}.placement-notes-list{display:grid;gap:10px}.placement-note-card{display:flex;align-items:center;gap:13px;border:1px solid var(--line,#e5e7eb);border-radius:16px;padding:14px;background:var(--card,#fff);box-shadow:0 3px 12px rgba(25,35,55,.035);min-width:0}.placement-note-filetype{width:48px;height:54px;flex:0 0 48px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(145deg,#fff0bd,#f8dfa0);color:#80540a;font-size:11px;font-weight:950;letter-spacing:.04em;border:1px solid #f0d17c}.placement-note-content{flex:1;min-width:0}.placement-note-tags{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:5px}.placement-note-tags span{font-size:9px;font-weight:800;color:#8c6415;background:#fff5d7;border-radius:999px;padding:4px 7px}.placement-note-tags span+span{color:var(--muted,#667085);background:var(--surface,#f4f5f7)}.placement-note-content h3{font-size:14px;line-height:1.4;margin:0;color:var(--ink,#202633);overflow-wrap:anywhere}.placement-note-content p{font-size:11px;line-height:1.5;margin:4px 0 0;color:var(--muted,#667085);overflow-wrap:anywhere}.placement-note-actions{display:flex;flex-direction:column;align-items:stretch;gap:6px;flex:0 0 auto}.placement-note-open{border:0;border-radius:10px;background:#34270e;color:#fff;padding:9px 11px;font-size:11px;font-weight:850;cursor:pointer}.placement-note-open span{color:#f6d178;margin-left:4px}.placement-note-delete{border:0;background:transparent;color:#b42318;font-size:10px;font-weight:800;cursor:pointer;padding:3px}.placement-notes-empty{text-align:center;border:1px dashed #ddc98e;border-radius:17px;padding:28px 18px;background:linear-gradient(135deg,#fffaf0,#fff)}.placement-notes-empty-icon{font-size:32px}.placement-notes-empty h3{margin:9px 0 5px;color:#4c3710;font-size:17px}.placement-notes-empty p{max-width:420px;margin:0 auto 12px;color:#796746;font-size:12px;line-height:1.6}.placement-notes-footnote{text-align:center;color:var(--muted,#667085);font-size:10px;margin:0}
 @media(max-width:540px){.placement-notes-hero{padding:18px}.placement-notes-toolbar{grid-template-columns:1fr}.placement-notes-filter{height:42px}.placement-notes-admin-card{align-items:flex-start;flex-wrap:wrap}.placement-notes-admin-copy{width:calc(100% - 60px);flex:1}.placement-notes-admin-card .placement-notes-upload-btn{width:100%}.placement-note-card{align-items:flex-start;gap:9px;padding:11px}.placement-note-filetype{width:39px;height:45px;flex-basis:39px;font-size:9px}.placement-note-actions{gap:5px}.placement-note-open{padding:8px 9px}.placement-note-content h3{font-size:13px}}
 </style>
 
