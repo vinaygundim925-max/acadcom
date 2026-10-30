@@ -1047,18 +1047,18 @@ window.togglePlacementNotesAnalytics = async function(){
     if(error) throw error;
     const rows=data||[];
 
-    // Resolve auth user IDs to student names and roll/student IDs.
-    // The existing admin-only profiles SELECT policy allows this lookup.
+    // Download events store Supabase Auth UUIDs. In Acadcom, the
+    // student roster links those UUIDs through students.auth_user_id.
     const userIds=[...new Set(rows.map(e=>e.user_id).filter(Boolean))];
-    let profiles=[];
+    let studentRows=[];
     if(userIds.length){
-      const {data:profileData,error:profileError}=await sb.from('profiles')
-        .select('id,full_name,student_id,role').in('id',userIds);
-      if(profileError) throw profileError;
-      profiles=profileData||[];
+      const {data:studentData,error:studentError}=await sb.from('students')
+        .select('auth_user_id,id,name,section').in('auth_user_id',userIds);
+      if(studentError) throw studentError;
+      studentRows=studentData||[];
     }
-    const profileById=new Map(profiles.map(p=>[String(p.id),p]));
-    const studentIds=new Set(profiles.filter(p=>p.role==='student').map(p=>String(p.id)));
+    const studentByAuthId=new Map(studentRows.map(s=>[String(s.auth_user_id),s]));
+    const studentIds=new Set(studentRows.map(s=>String(s.auth_user_id)));
     const notes=(window.SUPABASE_RESOURCES||[]).filter(isPlacementNoteResource);
 
     const formatEventTime=value=>{
@@ -1073,10 +1073,11 @@ window.togglePlacementNotesAnalytics = async function(){
       const events=rows.filter(e=>String(e.resource_id)===String(note.id));
       const noteStudentIds=[...new Set(events.map(e=>e.user_id).filter(id=>id && studentIds.has(String(id))))];
       const downloadList=events.map(event=>{
-        const profile=profileById.get(String(event.user_id));
-        const displayName=profile?.full_name||'Name unavailable';
-        const studentCode=profile?.student_id?` · ID: ${esc(profile.student_id)}`:'';
-        return `<li class="placement-download-person"><div><b>${esc(displayName)}</b><small>${studentCode ? `Student${studentCode}` : 'Student account'}</small></div><time>${esc(formatEventTime(event.created_at))}</time></li>`;
+        const student=studentByAuthId.get(String(event.user_id));
+        const displayName=student?.name||'Student record unavailable';
+        const studentCode=student?.id?` · Roll No: ${esc(student.id)}`:'';
+        const section=student?.section?` · Section ${esc(student.section)}`:'';
+        return `<li class="placement-download-person"><div><b>${esc(displayName)}</b><small>${student?`Student${studentCode}${section}`:'No matching student roster record'}</small></div><time>${esc(formatEventTime(event.created_at))}</time></li>`;
       }).join('');
       return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${noteStudentIds.length} unique students</small></div><span>↓ ${events.length} download clicks</span></div><details class="placement-download-details"><summary>View names (${events.length})</summary>${events.length?`<ul class="placement-download-people">${downloadList}</ul>`:'<p class="placement-download-empty">No download activity recorded yet.</p>'}</details></div>`;
     }).join('');
