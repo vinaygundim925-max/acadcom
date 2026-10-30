@@ -359,6 +359,18 @@ return this.parent.children[i-1]},XMLNode.prototype.next=function(){var i;if(i=t
 .placement-analytics-summary b{font-size:22px;display:block}
 .placement-analytics-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-top:1px solid var(--border,#eee);font-size:13px}
 .placement-analytics-row>div{min-width:0;flex:1}.placement-analytics-row b{display:block;overflow-wrap:anywhere}
+.placement-analytics-note{border-top:1px solid var(--border,#eee)}
+.placement-analytics-note .placement-analytics-row{border-top:0}
+.placement-download-details{padding:0 0 12px 0;font-size:12px}
+.placement-download-details summary{display:inline-block;cursor:pointer;color:#785719;font-weight:800;padding:7px 10px;border:1px solid #ead9b2;border-radius:9px;background:#fffaf0}
+.placement-download-people{list-style:none;margin:8px 0 0;padding:0;max-height:260px;overflow:auto;border:1px solid var(--border,#eee);border-radius:10px}
+.placement-download-person{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border,#eee)}
+.placement-download-person:last-child{border-bottom:0}
+.placement-download-person b{display:block;overflow-wrap:anywhere}
+.placement-download-person small{display:block;color:var(--muted,#667085);margin-top:3px}
+.placement-download-person time{color:var(--muted,#667085);font-size:11px;text-align:right;white-space:nowrap}
+.placement-download-empty{color:var(--muted,#667085);padding:8px 2px}
+@media(max-width:600px){.placement-download-person{align-items:flex-start;flex-direction:column}.placement-download-person time{text-align:left}}
 @media(max-width:600px){.placement-analytics-row{align-items:flex-start;flex-direction:column}.placement-analytics-summary{grid-template-columns:1fr 1fr}.placement-notes-admin-actions{width:100%}}
 </style>
 
@@ -1028,20 +1040,50 @@ window.togglePlacementNotesAnalytics = async function(){
   host.hidden=false;
   host.innerHTML='<p class="placement-notes-analytics-loading">Loading placement usage…</p>';
   try{
-    const {data,error}=await window.supabaseClient.from('placement_note_events')
-      .select('resource_id,user_id,event_type,created_at').order('created_at',{ascending:false});
+    const sb=window.supabaseClient;
+    const {data,error}=await sb.from('placement_note_events')
+      .select('resource_id,user_id,event_type,created_at').eq('event_type','download')
+      .order('created_at',{ascending:false});
     if(error) throw error;
-    const notes=(window.SUPABASE_RESOURCES||[]).filter(isPlacementNoteResource);
     const rows=data||[];
+
+    // Resolve auth user IDs to student names and roll/student IDs.
+    // The existing admin-only profiles SELECT policy allows this lookup.
+    const userIds=[...new Set(rows.map(e=>e.user_id).filter(Boolean))];
+    let profiles=[];
+    if(userIds.length){
+      const {data:profileData,error:profileError}=await sb.from('profiles')
+        .select('id,full_name,student_id,role').in('id',userIds);
+      if(profileError) throw profileError;
+      profiles=profileData||[];
+    }
+    const profileById=new Map(profiles.map(p=>[String(p.id),p]));
+    const studentIds=new Set(profiles.filter(p=>p.role==='student').map(p=>String(p.id)));
+    const notes=(window.SUPABASE_RESOURCES||[]).filter(isPlacementNoteResource);
+
+    const formatEventTime=value=>{
+      if(!value) return 'Time unavailable';
+      const date=new Date(value);
+      return Number.isNaN(date.getTime())?'Time unavailable':date.toLocaleString('en-IN',{
+        day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'
+      });
+    };
+
     const cards=notes.map(note=>{
       const events=rows.filter(e=>String(e.resource_id)===String(note.id));
-      const downloads=events.filter(e=>e.event_type==='download').length;
-      const students=new Set(events.map(e=>e.user_id).filter(Boolean)).size;
-      return `<div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${students} unique student accounts</small></div><span>↓ ${downloads} downloads</span></div>`;
+      const noteStudentIds=[...new Set(events.map(e=>e.user_id).filter(id=>id && studentIds.has(String(id))))];
+      const downloadList=events.map(event=>{
+        const profile=profileById.get(String(event.user_id));
+        const displayName=profile?.full_name||'Name unavailable';
+        const studentCode=profile?.student_id?` · ID: ${esc(profile.student_id)}`:'';
+        return `<li class="placement-download-person"><div><b>${esc(displayName)}</b><small>${studentCode ? `Student${studentCode}` : 'Student account'}</small></div><time>${esc(formatEventTime(event.created_at))}</time></li>`;
+      }).join('');
+      return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${noteStudentIds.length} unique students</small></div><span>↓ ${events.length} download clicks</span></div><details class="placement-download-details"><summary>View names (${events.length})</summary>${events.length?`<ul class="placement-download-people">${downloadList}</ul>`:'<p class="placement-download-empty">No download activity recorded yet.</p>'}</details></div>`;
     }).join('');
-    const totalDownloads=rows.filter(e=>e.event_type==='download').length;
-    const totalStudents=new Set(rows.map(e=>e.user_id).filter(Boolean)).size;
-    host.innerHTML=`<div class="placement-analytics-heading"><div><b>Placement Notes Analytics</b><small>Usage based on signed-in accounts</small></div><button onclick="togglePlacementNotesAnalytics()" aria-label="Close analytics">✕</button></div><div class="placement-analytics-summary"><div><b>${totalDownloads}</b><small>Total downloads</small></div><div><b>${totalStudents}</b><small>Unique students</small></div></div>${cards||'<p>No placement notes available yet.</p>'}`;
+
+    const totalDownloads=rows.length;
+    const totalStudents=studentIds.size;
+    host.innerHTML=`<div class="placement-analytics-heading"><div><b>Placement Notes Analytics</b><small>Student names and IDs · each entry is a download-button click</small></div><button onclick="togglePlacementNotesAnalytics()" aria-label="Close analytics">✕</button></div><div class="placement-analytics-summary"><div><b>${totalDownloads}</b><small>Download clicks</small></div><div><b>${totalStudents}</b><small>Unique students</small></div></div>${cards||'<p>No placement notes available yet.</p>'}`;
   }catch(err){
     console.error('Placement notes analytics load failed:',err);
     host.innerHTML='<p>Analytics are not configured yet. Apply the supplied SQL setup, then refresh.</p>';
