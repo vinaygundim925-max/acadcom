@@ -7109,117 +7109,110 @@ window.openPlacementNoteViewer = async function(id){
   if(!sb){toast('Supabase connection unavailable.');return;}
   const previous=document.getElementById('placementPdfViewer'); if(previous) previous.remove();
   const shell=document.createElement('div'); shell.id='placementPdfViewer'; shell.className='placement-pdf-viewer';
-  shell.innerHTML=`<div class="placement-pdf-toolbar"><div class="placement-pdf-heading"><b>${esc(resource.title||'Placement PDF')}</b><small>VIEW-ONLY READER · ACADCOM</small></div><div class="placement-pdf-tools"><button id="placementPdfZoomOut" aria-label="Zoom out">−</button><span id="placementPdfZoomLabel">Fit</span><button id="placementPdfZoomIn" aria-label="Zoom in">＋</button><button id="placementPdfFit" aria-label="Fit page to screen">Fit</button><button id="placementPdfClose" class="placement-pdf-close">Close ✕</button></div></div><div id="placementPdfStatus" class="placement-pdf-status">Securing your access…</div><div id="placementPdfPages" class="placement-pdf-pages"></div>`;
+  shell.innerHTML=`<div class="placement-pdf-toolbar"><div class="placement-pdf-heading"><b>${esc(resource.title||'Placement PDF')}</b><small>VIEW-ONLY READER · ACADCOM</small></div><div class="placement-pdf-tools"><button id="placementPdfZoomOut" aria-label="Zoom out">−</button><span id="placementPdfZoomLabel">Fit</span><button id="placementPdfZoomIn" aria-label="Zoom in">＋</button><button id="placementPdfFit" aria-label="Fit page">Fit</button><button id="placementPdfClose" class="placement-pdf-close">Close ✕</button></div></div><div id="placementPdfStatus" class="placement-pdf-status">Securing your access…</div><div id="placementPdfPages" class="placement-pdf-pages"></div>`;
   document.body.appendChild(shell);
-  let zoom=1.0, pdf=null, rendering=false, pageBases=[];
-  const status=shell.querySelector('#placementPdfStatus'), pages=shell.querySelector('#placementPdfPages');
-  const zoomLabel=shell.querySelector('#placementPdfZoomLabel');
-  const clampZoom=v=>Math.max(.5,Math.min(3,Math.round(v*100)/100));
-  const updateZoomLabel=()=>{zoomLabel.textContent=Math.round(zoom*100)+'%';};
-  const applyZoom=(next,anchorX)=>{
-    const old=zoom; zoom=clampZoom(next);
-    if(Math.abs(zoom-old)<.001)return;
-    const rect=pages.getBoundingClientRect();
-    const focusX=Number.isFinite(anchorX)?anchorX:(rect.left+rect.width/2);
-    const contentX=pages.scrollLeft+(focusX-rect.left);
-    const ratio=zoom/old;
-    pageBases.forEach(item=>{
-      item.wrap.style.width=(item.baseWidth*zoom)+'px';
-      item.canvas.style.width=(item.baseWidth*zoom)+'px';
-      item.wrap.style.marginLeft='auto';
-      item.wrap.style.marginRight='auto';
-    });
-    // Keep the point under the user's fingers (or viewport centre) in place.
-    requestAnimationFrame(()=>{pages.scrollLeft=Math.max(0,contentX*ratio-(focusX-rect.left));});
-    updateZoomLabel();
-  };
-  const fitToDevice=()=>{
-    if(!pageBases.length)return;
-    zoom=1;
-    pageBases.forEach(item=>{
-      item.wrap.style.width=item.baseWidth+'px';
-      item.canvas.style.width=item.baseWidth+'px';
-    });
-    pages.scrollLeft=0; updateZoomLabel();
-  };
-  const renderAll=async()=>{
-    if(!pdf||rendering)return; rendering=true; pages.innerHTML=''; pageBases=[];
+  let zoom=1, pdf=null, rendering=false, renderQueued=false, fitScale=1, pinchStartDistance=0, pinchStartZoom=1, pinchActive=false;
+  const status=shell.querySelector('#placementPdfStatus'), pages=shell.querySelector('#placementPdfPages'), zoomLabel=shell.querySelector('#placementPdfZoomLabel');
+  const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
+  const distance=(a,b)=>Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+  function measureFitScale(page){
+    const base=page.getViewport({scale:1});
+    const available=Math.max(220,pages.clientWidth-20);
+    // Fit to device width on phones and to a comfortable reading column on larger screens.
+    return Math.min(1,available/base.width);
+  }
+  function captureReadingAnchor(){
+    const scrollTop=pages.scrollTop;
+    const pagesRect=pages.getBoundingClientRect();
+    const screenOffset=Math.min(90,Math.max(30,pages.clientHeight*.18));
+    const probe=pagesRect.top+screenOffset;
+    const pageEls=[...pages.querySelectorAll('.placement-pdf-page')];
+    let chosen=pageEls.find(el=>el.getBoundingClientRect().bottom>=probe)||pageEls[pageEls.length-1];
+    if(!chosen)return null;
+    const rect=chosen.getBoundingClientRect();
+    const pageNo=Number(chosen.dataset.page||1);
+    const within=clamp((probe-rect.top)/Math.max(1,rect.height),0,1);
+    return {pageNo,within,screenOffset,scrollLeft:pages.scrollLeft,leftRatio:pages.scrollLeft/Math.max(1,pages.scrollWidth-pages.clientWidth)};
+  }
+  function restoreReadingAnchor(anchor){
+    if(!anchor)return;
+    const target=pages.querySelector('.placement-pdf-page[data-page="'+anchor.pageNo+'"]');
+    if(!target)return;
+    const pagesRect=pages.getBoundingClientRect();
+    const targetRect=target.getBoundingClientRect();
+    const newPageTop=targetRect.top-pagesRect.top+pages.scrollTop;
+    const newProbe=newPageTop+targetRect.height*anchor.within;
+    pages.scrollTop=Math.max(0,newProbe-anchor.screenOffset);
+    const maxLeft=Math.max(0,pages.scrollWidth-pages.clientWidth);
+    pages.scrollLeft=maxLeft*anchor.leftRatio;
+  }
+  async function renderAll(anchor){
+    if(!pdf)return;
+    if(rendering){renderQueued=true;return;}
+    rendering=true;
+    const keep=anchor===undefined?captureReadingAnchor():anchor;
+    pages.innerHTML='';
     try{
-      const available=Math.max(240,pages.clientWidth-(window.innerWidth<=700?12:48));
-      const maxWidth=window.innerWidth<=700?available:Math.min(1120,available);
       for(let n=1;n<=pdf.numPages;n++){
         const page=await pdf.getPage(n);
-        const unit=page.getViewport({scale:1});
-        const baseScale=Math.min(maxWidth/unit.width,1.65);
-        const baseViewport=page.getViewport({scale:baseScale});
-        const dpr=Math.min(window.devicePixelRatio||1,2);
-        const renderViewport=page.getViewport({scale:baseScale*dpr});
-        const wrap=document.createElement('div'); wrap.className='placement-pdf-page';
+        if(n===1)fitScale=measureFitScale(page);
+        const scale=fitScale*zoom, viewport=page.getViewport({scale});
+        const wrap=document.createElement('div'); wrap.className='placement-pdf-page'; wrap.dataset.page=String(n);
+        wrap.style.width=Math.ceil(viewport.width)+'px'; wrap.style.maxWidth='none';
         const canvas=document.createElement('canvas');
-        canvas.width=Math.ceil(renderViewport.width); canvas.height=Math.ceil(renderViewport.height);
-        canvas.style.width=baseViewport.width+'px'; canvas.style.height='auto';
-        wrap.style.width=baseViewport.width+'px';
+        const dpr=Math.min(2,window.devicePixelRatio||1);
+        canvas.width=Math.ceil(viewport.width*dpr); canvas.height=Math.ceil(viewport.height*dpr);
+        canvas.style.width=Math.ceil(viewport.width)+'px'; canvas.style.height=Math.ceil(viewport.height)+'px';
         const watermark=document.createElement('div'); watermark.className='placement-pdf-watermark'; watermark.textContent=(CURRENT_USER?.name||'ACADCOM USER')+' · '+(CURRENT_USER?.studentId||CURRENT_USER?.id||'')+' · VIEW ONLY';
         const number=document.createElement('small'); number.className='placement-pdf-page-number'; number.textContent='Page '+n+' of '+pdf.numPages;
         wrap.append(canvas,watermark,number); pages.appendChild(wrap);
-        pageBases.push({wrap,canvas,baseWidth:baseViewport.width});
-        const ctx=canvas.getContext('2d',{alpha:false});
-        await page.render({canvasContext:ctx,viewport:renderViewport}).promise;
+        const ctx=canvas.getContext('2d');
+        await page.render({canvasContext:ctx,viewport,transform:dpr===1?null:[dpr,0,0,dpr,0,0]}).promise;
       }
-      status.textContent=pdf.numPages+' pages · Pinch to zoom · Use + / − or Fit'; status.classList.add('is-ready');
-      fitToDevice();
+      zoomLabel.textContent=Math.round(fitScale*zoom*100)+'%';
+      status.textContent=pdf.numPages+' pages · Scroll to read · Pinch or use + / − to zoom'; status.classList.add('is-ready');
+      requestAnimationFrame(()=>restoreReadingAnchor(keep));
     }catch(e){status.textContent='Could not render this PDF: '+e.message;}
-    finally{rendering=false;}
-  };
+    finally{
+      rendering=false;
+      if(renderQueued){renderQueued=false;renderAll(captureReadingAnchor());}
+    }
+  }
+  function changeZoom(next){
+    if(!pdf||rendering)return;
+    const anchor=captureReadingAnchor();
+    zoom=clamp(next,.5,3);
+    renderAll(anchor);
+  }
   shell.querySelector('#placementPdfClose').onclick=()=>shell.remove();
   shell.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&['p','s'].includes(String(e.key).toLowerCase())){e.preventDefault();e.stopPropagation();}});
   shell.addEventListener('contextmenu',e=>e.preventDefault());
-  shell.querySelector('#placementPdfZoomIn').onclick=()=>applyZoom(zoom+.1);
-  shell.querySelector('#placementPdfZoomOut').onclick=()=>applyZoom(zoom-.1);
-  shell.querySelector('#placementPdfFit').onclick=fitToDevice;
-
-  // Native two-finger pinch zoom on touch screens; one-finger vertical scrolling remains native.
-  let pinchStart=0, pinchZoom=1, pinchMidX=0;
-  const touchDistance=ts=>Math.hypot(ts[0].clientX-ts[1].clientX,ts[0].clientY-ts[1].clientY);
+  shell.querySelector('#placementPdfZoomIn').onclick=()=>changeZoom(zoom+.1);
+  shell.querySelector('#placementPdfZoomOut').onclick=()=>changeZoom(zoom-.1);
+  shell.querySelector('#placementPdfFit').onclick=()=>changeZoom(1);
+  // Native two-finger pinch: prevent browser page zoom and update the PDF only when the gesture ends.
   pages.addEventListener('touchstart',e=>{
-    if(e.touches.length===2){
-      pinchStart=touchDistance(e.touches); pinchZoom=zoom;
-      pinchMidX=(e.touches[0].clientX+e.touches[1].clientX)/2;
-    }
+    if(e.touches.length===2){pinchActive=true;pinchStartDistance=distance(e.touches[0],e.touches[1]);pinchStartZoom=zoom;}
   },{passive:true});
   pages.addEventListener('touchmove',e=>{
-    if(e.touches.length===2&&pinchStart>0){
-      e.preventDefault();
-      const distance=touchDistance(e.touches);
-      const midpoint=(e.touches[0].clientX+e.touches[1].clientX)/2;
-      applyZoom(pinchZoom*(distance/pinchStart),midpoint);
-    }
+    if(pinchActive&&e.touches.length===2){e.preventDefault();}
   },{passive:false});
-  ['touchend','touchcancel'].forEach(type=>pages.addEventListener(type,e=>{
-    if(e.touches.length<2)pinchStart=0;
-  },{passive:true}));
-
-  // Ctrl/Command + mouse wheel zoom on laptops; ordinary wheel/trackpad scrolling is unchanged.
-  pages.addEventListener('wheel',e=>{
-    if(e.ctrlKey||e.metaKey){
-      e.preventDefault();
-      applyZoom(zoom*(e.deltaY<0?1.08:.92),e.clientX);
+  pages.addEventListener('touchend',e=>{
+    if(pinchActive&&e.touches.length<2){
+      const changed=e.changedTouches;
+      // Use the final distance recorded during the gesture (updated by touchmove below).
+      pinchActive=false;
+      if(pinchNextZoom!=null){const next=pinchNextZoom;pinchNextZoom=null;changeZoom(next);}
     }
-  },{passive:false});
-
-  // Re-fit when the device orientation or browser window size changes.
-  let resizeTimer;
-  const onResize=()=>{
-    clearTimeout(resizeTimer);
-    resizeTimer=setTimeout(()=>{
-      if(!pdf||!pageBases.length)return;
-      const wasFit=Math.abs(zoom-1)<.01;
-      if(wasFit)renderAll();
-    },180);
-  };
-  window.addEventListener('resize',onResize);
-  const cleanup=()=>{window.removeEventListener('resize',onResize);clearTimeout(resizeTimer);};
-  shell.querySelector('#placementPdfClose').addEventListener('click',cleanup,{once:true});
+  },{passive:true});
+  let pinchNextZoom=null;
+  pages.addEventListener('touchmove',e=>{
+    if(pinchActive&&e.touches.length===2&&pinchStartDistance>0){
+      const ratio=distance(e.touches[0],e.touches[1])/pinchStartDistance;
+      pinchNextZoom=clamp(pinchStartZoom*ratio,.5,3);
+      zoomLabel.textContent=Math.round(fitScale*pinchNextZoom*100)+'%';
+    }
+  },{passive:true});
   try{
     const {data,error}=await sb.functions.invoke('placement-notes-access',{body:{action:'view',resourceId:String(id)}});
     if(error) throw new Error(error.message||'Access request failed.');
@@ -7227,10 +7220,9 @@ window.openPlacementNoteViewer = async function(id){
     const pdfjs=await loadPlacementPdfJs();
     const loading=pdfjs.getDocument({url:data.url,withCredentials:false,disableAutoFetch:false,disableStream:false});
     pdf=await loading.promise;
-    await renderAll();
+    await renderAll(null);
   }catch(err){status.textContent=err?.message||'Unable to open this PDF.';status.classList.add('is-error');}
 };
-
 window.migratePlacementNotes = async function(){
   if(CURRENT_USER?.role!=='admin'){toast('Admin access required.');return;}
   if(!confirm('Secure all existing Placement Notes PDFs now? This copies them to private storage, updates their records, and removes their public copies only after a verified private copy is saved. General Resources will not be changed.'))return;
@@ -11939,18 +11931,13 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
 .acadcom-global-homebar button:hover{background:var(--seal-tint,#e9eefb);transform:translateY(-1px)}
 .acadcom-global-homebar button:focus-visible{outline:3px solid rgba(58,98,216,.3);outline-offset:2px}
 
-.placement-pdf-viewer{position:fixed;inset:0;z-index:100000;background:#eef0f3;display:flex;flex-direction:column;color:#1f2937;min-width:0;min-height:0}
-.placement-pdf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:#211b10;color:#fff;box-shadow:0 3px 14px #0003;z-index:2;flex:0 0 auto}
+.placement-pdf-viewer{position:fixed;inset:0;z-index:100000;background:#eef0f3;display:flex;flex-direction:column;color:#1f2937}
+.placement-pdf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:#211b10;color:#fff;box-shadow:0 3px 14px #0003;z-index:2}
 .placement-pdf-heading{min-width:0}.placement-pdf-heading b{display:block;max-width:52vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.placement-pdf-heading small{display:block;color:#f0d38c;font-size:9px;letter-spacing:.12em;margin-top:3px}
-.placement-pdf-tools{display:flex;align-items:center;gap:7px;flex-wrap:nowrap}.placement-pdf-tools button{border:1px solid #8d774d;background:#40341e;color:#fff;border-radius:8px;padding:9px 13px;font-weight:800;cursor:pointer;touch-action:manipulation;min-width:42px}.placement-pdf-tools button:active{transform:scale(.96)}.placement-pdf-tools span{font-size:12px;min-width:46px;text-align:center;font-variant-numeric:tabular-nums}.placement-pdf-tools .placement-pdf-close{background:#f4e8c9;color:#38280c;border-color:#f4e8c9}
-.placement-pdf-status{padding:10px;text-align:center;background:#fff7e5;color:#73520d;font-size:12px;flex:0 0 auto}.placement-pdf-status.is-ready{color:#47634a}.placement-pdf-status.is-error{color:#a11;background:#fff0f0}
-.placement-pdf-pages{flex:1 1 auto;min-height:0;min-width:0;overflow:auto;padding:18px 12px 36px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;position:relative}
-.placement-pdf-page{position:relative;width:max-content;max-width:none;margin:0 auto 18px;background:#fff;box-shadow:0 2px 14px #0002;overflow:hidden;transition:width .12s ease;transform-origin:top center}
-.placement-pdf-page canvas{display:block;max-width:none;height:auto}
-.placement-pdf-watermark{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;user-select:none;opacity:.13;color:#7a4b00;font-size:clamp(14px,2vw,24px);font-weight:900;letter-spacing:.12em;text-align:center;transform:rotate(-28deg);text-shadow:0 0 1px #fff;white-space:nowrap}.placement-pdf-page-number{position:absolute;right:10px;bottom:7px;color:#666;background:#ffffffbd;padding:3px 6px;border-radius:5px;font-size:10px}
-@media(max-width:700px){.placement-pdf-toolbar{align-items:flex-start;flex-direction:column;gap:8px;padding:9px 12px}.placement-pdf-heading b{max-width:90vw;font-size:14px}.placement-pdf-tools{width:100%;justify-content:flex-end}.placement-pdf-tools button{padding:9px 14px}.placement-pdf-pages{padding:10px 5px 28px}}
-@media(min-width:701px){.placement-pdf-pages{padding:22px 24px 40px}}
-@media(prefers-reduced-motion:reduce){.placement-pdf-page{transition:none}}
+.placement-pdf-tools{display:flex;align-items:center;gap:7px}.placement-pdf-tools button{border:1px solid #8d774d;background:#40341e;color:#fff;border-radius:8px;padding:8px 11px;font-weight:800;cursor:pointer}.placement-pdf-tools span{font-size:12px;min-width:42px;text-align:center}.placement-pdf-tools .placement-pdf-close{background:#f4e8c9;color:#38280c;border-color:#f4e8c9}
+.placement-pdf-status{padding:10px;text-align:center;background:#fff7e5;color:#73520d;font-size:12px}.placement-pdf-status.is-ready{color:#47634a}.placement-pdf-status.is-error{color:#a11;background:#fff0f0}
+.placement-pdf-pages{flex:1;overflow:auto;padding:18px 10px 36px;overscroll-behavior:contain;touch-action:pan-x pan-y;scroll-behavior:auto}.placement-pdf-page{position:relative;width:max-content;margin:0 auto 18px;background:#fff;box-shadow:0 2px 14px #0002;overflow:hidden;flex:none}.placement-pdf-page canvas{display:block;max-width:none}.placement-pdf-watermark{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;user-select:none;opacity:.13;color:#7a4b00;font-size:clamp(14px,2vw,24px);font-weight:900;letter-spacing:.12em;text-align:center;transform:rotate(-28deg);text-shadow:0 0 1px #fff;white-space:nowrap}.placement-pdf-page-number{position:absolute;right:10px;bottom:7px;color:#666;background:#ffffffbd;padding:3px 6px;border-radius:5px;font-size:10px}
+@media(max-width:600px){.placement-pdf-toolbar{align-items:flex-start;flex-direction:column}.placement-pdf-heading b{max-width:88vw}.placement-pdf-tools{width:100%;justify-content:flex-end}.placement-pdf-pages{padding:10px 4px 28px}}
 
 </style>
 
