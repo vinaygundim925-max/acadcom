@@ -7109,19 +7109,31 @@ window.openPlacementNoteViewer = async function(id){
   if(!sb){toast('Supabase connection unavailable.');return;}
   const previous=document.getElementById('placementPdfViewer'); if(previous) previous.remove();
   const shell=document.createElement('div'); shell.id='placementPdfViewer'; shell.className='placement-pdf-viewer';
-  shell.innerHTML=`<div class="placement-pdf-toolbar"><div class="placement-pdf-heading"><b>${esc(resource.title||'Placement PDF')}</b><small>PLACEMENT NOTES READER · ACADCOM</small></div><div class="placement-pdf-tools"><button id="placementPdfZoomOut" aria-label="Zoom out">−</button><span id="placementPdfZoomLabel">100%</span><button id="placementPdfZoomIn" aria-label="Zoom in">＋</button><button id="placementPdfDownload" class="placement-pdf-download">⬇ Download</button><button id="placementPdfClose" class="placement-pdf-close">Close ✕</button></div></div><div id="placementPdfStatus" class="placement-pdf-status">Securing your access…</div><div id="placementPdfPages" class="placement-pdf-pages"></div>`;
+  shell.innerHTML=`<div class="placement-pdf-toolbar"><div class="placement-pdf-heading"><b>${esc(resource.title||'Placement PDF')}</b><small>PLACEMENT NOTES READER · ACADCOM</small></div><div class="placement-pdf-tools"><button id="placementPdfZoomOut" aria-label="Zoom out">−</button><span id="placementPdfZoomLabel">Fit</span><button id="placementPdfZoomIn" aria-label="Zoom in">＋</button><button id="placementPdfFit" aria-label="Fit to screen">Fit</button><button id="placementPdfClose" class="placement-pdf-close">Close ✕</button></div></div><div id="placementPdfStatus" class="placement-pdf-status">Securing your access…</div><div id="placementPdfPages" class="placement-pdf-pages"></div>`;
   document.body.appendChild(shell);
-  let zoom=1, pdf=null, observer=null, resizeTimer=null;
+  let zoom=1, pdf=null, observer=null, resizeTimer=null, pinchStartDistance=0, pinchStartZoom=1, pinchFrame=0;
   const status=shell.querySelector('#placementPdfStatus'), pages=shell.querySelector('#placementPdfPages');
   const pageStates=new Map();
-  const fitScale=()=>Math.max(.2,(pages.clientWidth-24)/612);
+  const fitScale=(page)=>{
+    const base=page.getViewport({scale:1});
+    const style=getComputedStyle(pages);
+    const horizontalPadding=(parseFloat(style.paddingLeft)||0)+(parseFloat(style.paddingRight)||0);
+    const verticalPadding=(parseFloat(style.paddingTop)||0)+(parseFloat(style.paddingBottom)||0);
+    const availableWidth=Math.max(240,pages.clientWidth-horizontalPadding-12);
+    const widthScale=availableWidth/base.width;
+    // On phones prioritise readable full-width pages; on laptops fit both width and usable height.
+    const isMobile=window.matchMedia('(max-width: 700px)').matches || window.matchMedia('(pointer: coarse)').matches;
+    const availableHeight=Math.max(260,pages.clientHeight-verticalPadding-24);
+    const heightScale=availableHeight/base.height;
+    return Math.max(.2,Math.min(3,isMobile?widthScale:Math.min(widthScale,heightScale)));
+  };
   const drawPage=async(n)=>{
     const state=pageStates.get(n); if(!pdf||!state||state.rendering)return;
     state.rendering=true;
     try{
       if(state.task){try{state.task.cancel();}catch(_){}}
       const page=await pdf.getPage(n);
-      const scale=fitScale()*zoom;
+      const scale=fitScale(page)*zoom;
       const viewport=page.getViewport({scale});
       const dpr=Math.min(window.devicePixelRatio||1,2);
       state.canvas.width=Math.ceil(viewport.width*dpr);
@@ -7129,6 +7141,7 @@ window.openPlacementNoteViewer = async function(id){
       state.canvas.style.width=Math.ceil(viewport.width)+'px';
       state.canvas.style.height=Math.ceil(viewport.height)+'px';
       state.wrap.style.width=Math.ceil(viewport.width)+'px';
+      state.wrap.style.height=Math.ceil(viewport.height)+'px';
       state.task=page.render({canvasContext:state.canvas.getContext('2d'),viewport,transform:dpr===1?null:[dpr,0,0,dpr,0,0]});
       await state.task.promise;
       state.rendered=true;
@@ -7161,51 +7174,40 @@ window.openPlacementNoteViewer = async function(id){
     queueVisiblePages();
   };
   const updateZoom=()=>{
-    shell.querySelector('#placementPdfZoomLabel').textContent=Math.round(zoom*100)+'%';
-    for(const [n,state] of pageStates){state.rendered=false;if(state.rendering)state.needsRender=true;else drawPage(n);}
+    const label=shell.querySelector('#placementPdfZoomLabel');
+    label.textContent=zoom===1?'Fit':Math.round(zoom*100)+'%';
+    // Keep the page currently being read at approximately the same viewport position.
+    const viewRect=pages.getBoundingClientRect();
+    let anchor=null;
+    for(const [n,state] of pageStates){const r=state.wrap.getBoundingClientRect();if(r.bottom>viewRect.top+8){anchor={n,offset:r.top-viewRect.top};break;}}
+    for(const [n,state] of pageStates){state.rendered=false;if(state.rendering){state.needsRender=true;try{state.task?.cancel();}catch(_){}}}
+    // Re-render only pages close to the viewport; keep distant pages lazy for performance.
+    queueVisiblePages();
+    if(anchor){requestAnimationFrame(()=>{const target=pageStates.get(anchor.n)?.wrap;if(target)pages.scrollTop+=target.getBoundingClientRect().top-pages.getBoundingClientRect().top-anchor.offset;queueVisiblePages();});}
   };
   shell.querySelector('#placementPdfClose').onclick=()=>{if(observer)observer.disconnect();if(pdf?.destroy)pdf.destroy();shell.remove();};
-  shell.querySelector('#placementPdfDownload').onclick=async()=>{
-    const downloadBtn=shell.querySelector('#placementPdfDownload');
-    if(downloadBtn.disabled)return;
-    const studentName=String(CURRENT_USER?.name||'').trim();
-    if(!studentName){toast('Your profile name is unavailable. Please contact the Academic Committee.');return;}
-    downloadBtn.disabled=true;downloadBtn.textContent='Preparing PDF…';
-    try{
-      if(!window.PDFLib){
-        await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';script.onload=resolve;script.onerror=()=>reject(new Error('Could not load the PDF download library.'));document.head.appendChild(script);});
-      }
-      // Request a fresh short-lived private URL so downloads also work after the reader has been open for a while.
-      const {data:accessData,error:accessError}=await sb.functions.invoke('placement-notes-access',{body:{action:'view',resourceId:String(id)}});
-      if(accessError)throw new Error(accessError.message||'Could not verify PDF access.');
-      if(accessData?.error)throw new Error(accessData.error);
-      const response=await fetch(accessData.url,{cache:'no-store'});
-      if(!response.ok)throw new Error('The original PDF could not be retrieved.');
-      const sourceBytes=await response.arrayBuffer();
-      const {PDFDocument,StandardFonts,rgb,degrees}=window.PDFLib;
-      const doc=await PDFDocument.load(sourceBytes);
-      const font=await doc.embedFont(StandardFonts.HelveticaBold);
-      for(const page of doc.getPages()){
-        const {width,height}=page.getSize();
-        const fontSize=Math.max(16,Math.min(30,width*0.042));
-        const textWidth=font.widthOfTextAtSize(studentName,fontSize);
-        page.drawText(studentName,{x:(width-textWidth)/2,y:height/2,font,fontSize,color:rgb(0.48,0.48,0.48),opacity:0.19,rotate:degrees(-32)});
-      }
-      const output=await doc.save();
-      const blob=new Blob([output],{type:'application/pdf'});
-      const objectUrl=URL.createObjectURL(blob);
-      const link=document.createElement('a');
-      const safeTitle=String(resource.title||'Placement-Note').replace(/[^a-z0-9_-]+/gi,'_').replace(/^_+|_+$/g,'')||'Placement-Note';
-      link.href=objectUrl;link.download=safeTitle+'_watermarked.pdf';document.body.appendChild(link);link.click();link.remove();
-      setTimeout(()=>URL.revokeObjectURL(objectUrl),60000);
-      toast('Watermarked PDF downloaded.');
-    }catch(err){console.error('Placement PDF download failed:',err);toast(err?.message||'Could not prepare the watermarked PDF.');}
-    finally{downloadBtn.disabled=false;downloadBtn.textContent='⬇ Download';}
-  };
   shell.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&['p','s'].includes(String(e.key).toLowerCase())){e.preventDefault();e.stopPropagation();}});
   shell.addEventListener('contextmenu',e=>e.preventDefault());
-  shell.querySelector('#placementPdfZoomIn').onclick=()=>{zoom=Math.min(2.5,Math.round((zoom+.2)*100)/100);updateZoom();};
-  shell.querySelector('#placementPdfZoomOut').onclick=()=>{zoom=Math.max(.5,Math.round((zoom-.2)*100)/100);updateZoom();};
+  const setZoom=(value)=>{zoom=Math.max(.35,Math.min(4,Math.round(value*100)/100));updateZoom();};
+  shell.querySelector('#placementPdfZoomIn').onclick=()=>setZoom(zoom+.08);
+  shell.querySelector('#placementPdfZoomOut').onclick=()=>setZoom(zoom-.08);
+  shell.querySelector('#placementPdfFit').onclick=()=>{zoom=1;updateZoom();};
+  // Native two-finger pinch-to-zoom for touchscreens. Prevent browser page zoom only inside the PDF reader.
+  const touchDistance=(touches)=>{const dx=touches[0].clientX-touches[1].clientX,dy=touches[0].clientY-touches[1].clientY;return Math.hypot(dx,dy);};
+  pages.addEventListener('touchstart',e=>{if(e.touches.length===2){pinchStartDistance=touchDistance(e.touches);pinchStartZoom=zoom;}},{passive:true});
+  pages.addEventListener('touchmove',e=>{
+    if(e.touches.length!==2||!pinchStartDistance)return;
+    e.preventDefault();
+    const ratio=touchDistance(e.touches)/pinchStartDistance;
+    const next=Math.max(.35,Math.min(4,pinchStartZoom*ratio));
+    if(pinchFrame)return;
+    pinchFrame=requestAnimationFrame(()=>{pinchFrame=0;zoom=Math.round(next*100)/100;updateZoom();});
+  },{passive:false});
+  const endPinch=()=>{pinchStartDistance=0;};
+  pages.addEventListener('touchend',endPinch,{passive:true});
+  pages.addEventListener('touchcancel',endPinch,{passive:true});
+  // Trackpad pinch / Ctrl+wheel zoom on laptops without affecting ordinary scrolling.
+  pages.addEventListener('wheel',e=>{if(e.ctrlKey||e.metaKey){e.preventDefault();setZoom(zoom*(e.deltaY<0?1.06:.94));}},{passive:false});
   pages.addEventListener('scroll',queueVisiblePages,{passive:true});
   window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{for(const [n,state] of pageStates){state.rendered=false;if(state.rendering)state.needsRender=true;else drawPage(n);}},180);},{passive:true});
   try{
@@ -7216,7 +7218,7 @@ window.openPlacementNoteViewer = async function(id){
     const loading=pdfjs.getDocument({url:data.url,withCredentials:false,disableAutoFetch:true,disableStream:true,rangeChunkSize:65536});
     pdf=await loading.promise;
     createPageShells();
-    status.textContent=pdf.numPages+' pages · Pages load as you scroll · Zoom controls above'; status.classList.add('is-ready');
+    status.textContent=pdf.numPages+' pages · Scroll to read · Pinch or use + / − to zoom'; status.classList.add('is-ready');
   }catch(err){status.textContent=err?.message||'Unable to open this PDF.';status.classList.add('is-error');}
 };
 
@@ -11928,13 +11930,15 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
 .acadcom-global-homebar button:hover{background:var(--seal-tint,#e9eefb);transform:translateY(-1px)}
 .acadcom-global-homebar button:focus-visible{outline:3px solid rgba(58,98,216,.3);outline-offset:2px}
 
-.placement-pdf-viewer{position:fixed;inset:0;z-index:100000;background:#eef0f3;display:flex;flex-direction:column;color:#1f2937}
-.placement-pdf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:#211b10;color:#fff;box-shadow:0 3px 14px #0003;z-index:2}
-.placement-pdf-heading{min-width:0}.placement-pdf-heading b{display:block;max-width:52vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.placement-pdf-heading small{display:block;color:#f0d38c;font-size:9px;letter-spacing:.12em;margin-top:3px}
-.placement-pdf-tools{display:flex;align-items:center;gap:7px}.placement-pdf-tools button{border:1px solid #8d774d;background:#40341e;color:#fff;border-radius:8px;padding:8px 11px;font-weight:800;cursor:pointer}.placement-pdf-tools span{font-size:12px;min-width:42px;text-align:center}.placement-pdf-tools .placement-pdf-close{background:#f4e8c9;color:#38280c;border-color:#f4e8c9}.placement-pdf-tools .placement-pdf-download{background:#e8c66f;color:#30230c;border-color:#e8c66f}.placement-pdf-tools button:disabled{opacity:.6;cursor:wait}
-.placement-pdf-status{padding:10px;text-align:center;background:#fff7e5;color:#73520d;font-size:12px}.placement-pdf-status.is-ready{color:#47634a}.placement-pdf-status.is-error{color:#a11;background:#fff0f0}
-.placement-pdf-pages{flex:1;overflow:auto;padding:18px 10px 36px;overscroll-behavior:contain}.placement-pdf-placeholder{height:220px;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:13px;background:#fff}.placement-pdf-page canvas{max-width:none!important}.placement-pdf-page{position:relative;width:min(100%,980px);margin:0 auto 18px;background:#fff;box-shadow:0 2px 14px #0002;overflow:hidden}.placement-pdf-page canvas{display:block}.placement-pdf-watermark{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;user-select:none;opacity:.13;color:#7a4b00;font-size:clamp(14px,2vw,24px);font-weight:900;letter-spacing:.12em;text-align:center;transform:rotate(-28deg);text-shadow:0 0 1px #fff;white-space:nowrap}.placement-pdf-page-number{position:absolute;right:10px;bottom:7px;color:#666;background:#ffffffbd;padding:3px 6px;border-radius:5px;font-size:10px}
-@media(max-width:600px){.placement-pdf-toolbar{align-items:flex-start;flex-direction:column}.placement-pdf-heading b{max-width:88vw}.placement-pdf-tools{width:100%;justify-content:flex-end}.placement-pdf-pages{padding:10px 4px 28px}}
+.placement-pdf-viewer{position:fixed;inset:0;z-index:100000;background:#eef0f3;display:flex;flex-direction:column;color:#1f2937;min-width:0;overflow:hidden}
+.placement-pdf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:#211b10;color:#fff;box-shadow:0 3px 14px #0003;z-index:2;flex:none;min-width:0}
+.placement-pdf-heading{min-width:0;flex:1}.placement-pdf-heading b{display:block;max-width:52vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.placement-pdf-heading small{display:block;color:#f0d38c;font-size:9px;letter-spacing:.12em;margin-top:3px}
+.placement-pdf-tools{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}.placement-pdf-tools button{border:1px solid #8d774d;background:#40341e;color:#fff;border-radius:8px;padding:8px 11px;font-weight:800;cursor:pointer;transition:background .16s ease,transform .16s ease}.placement-pdf-tools button:active{transform:scale(.96)}.placement-pdf-tools span{font-size:12px;min-width:42px;text-align:center}.placement-pdf-tools .placement-pdf-close{background:#f4e8c9;color:#38280c;border-color:#f4e8c9}.placement-pdf-tools button:disabled{opacity:.6;cursor:wait}
+.placement-pdf-status{padding:10px;text-align:center;background:#fff7e5;color:#73520d;font-size:12px;flex:none}.placement-pdf-status.is-ready{color:#47634a}.placement-pdf-status.is-error{color:#a11;background:#fff0f0}
+.placement-pdf-pages{flex:1;min-width:0;min-height:0;width:100%;overflow:auto;padding:18px 12px 36px;overscroll-behavior:contain;box-sizing:border-box;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;}.placement-pdf-placeholder{height:220px;display:flex;align-items:center;justify-content:center;color:#9ca3af;font-size:13px;background:#fff}.placement-pdf-page canvas{max-width:none!important}.placement-pdf-page{position:relative;width:max-content;max-width:none;margin:0 auto 18px;background:#fff;box-shadow:0 2px 14px #0002;overflow:hidden;flex:none;transition:width .16s ease,height .16s ease}.placement-pdf-page canvas{display:block}.placement-pdf-watermark{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;user-select:none;opacity:.13;color:#7a4b00;font-size:clamp(14px,2vw,24px);font-weight:900;letter-spacing:.12em;text-align:center;transform:rotate(-28deg);text-shadow:0 0 1px #fff;white-space:nowrap}.placement-pdf-page-number{position:absolute;right:10px;bottom:7px;color:#666;background:#ffffffbd;padding:3px 6px;border-radius:5px;font-size:10px}
+.placement-pdf-page{transform-origin:top center}.placement-pdf-pages{scrollbar-gutter:stable}.placement-pdf-tools button{min-width:42px;min-height:40px}.placement-pdf-tools #placementPdfZoomLabel{font-variant-numeric:tabular-nums}
+@media(max-width:700px){.placement-pdf-toolbar{align-items:stretch;flex-direction:column;gap:8px;padding:9px 10px}.placement-pdf-heading b{max-width:90vw;font-size:13px}.placement-pdf-tools{width:100%;justify-content:space-between;gap:5px}.placement-pdf-tools button{padding:8px 10px;font-size:13px}.placement-pdf-pages{padding:10px 4px 28px}.placement-pdf-status{font-size:11px;padding:8px 5px}}
+@media(min-width:701px){.placement-pdf-toolbar{padding:12px 22px}.placement-pdf-heading b{max-width:38vw;font-size:16px}.placement-pdf-pages{padding:22px 24px 42px}}
 
 </style>
 
