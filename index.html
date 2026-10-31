@@ -977,15 +977,6 @@ function placementNoteDate(value){
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? 'Recently added' : d.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
 }
-// Frontend-only illustrative display count; never used by admin analytics or Supabase.
-window.PLACEMENT_NOTE_DISPLAY_COUNTS = window.PLACEMENT_NOTE_DISPLAY_COUNTS || {};
-function placementNoteDisplayCount(resourceId){
-  const key=String(resourceId||'');
-  if(!Object.prototype.hasOwnProperty.call(window.PLACEMENT_NOTE_DISPLAY_COUNTS,key)){
-    window.PLACEMENT_NOTE_DISPLAY_COUNTS[key]=30+Math.floor(Math.random()*31);
-  }
-  return window.PLACEMENT_NOTE_DISPLAY_COUNTS[key];
-}
 function renderPlacementNotes(){
   const isAdmin = CURRENT_USER?.role === 'admin';
   const all = (Array.isArray(window.SUPABASE_RESOURCES) ? window.SUPABASE_RESOURCES : [])
@@ -1016,20 +1007,20 @@ function renderPlacementNotes(){
           ${categories.map(c=>`<option value="${esc(c)}" ${category===c?'selected':''}>${c==='All'?'All categories':c}</option>`).join('')}
         </select>
       </div>
-      ${isAdmin ? `<div class="placement-notes-admin-card"><div class="placement-notes-admin-icon">＋</div><div class="placement-notes-admin-copy"><b>Add placement material</b><span>Upload a PDF, PPT, Word document or spreadsheet for students.</span></div><div class="placement-notes-admin-actions"><button class="placement-notes-analytics-btn" onclick="togglePlacementNotesAnalytics()">↗ Usage analytics</button><button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload notes</button></div></div><div id="placementNotesAnalytics" class="placement-notes-analytics" hidden></div>` : ''}
+      ${isAdmin ? `<div class="placement-notes-admin-card"><div class="placement-notes-admin-icon">＋</div><div class="placement-notes-admin-copy"><b>Secure placement library</b><span>PDF-only, in-app reading for students. Files are stored privately.</span></div><div class="placement-notes-admin-actions"><button class="placement-notes-analytics-btn" onclick="migratePlacementNotes()">🔒 Secure existing PDFs</button><button class="placement-notes-analytics-btn" onclick="togglePlacementNotesAnalytics()">↗ View analytics</button><button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload PDF</button></div></div><div id="placementNotesAnalytics" class="placement-notes-analytics" hidden></div>` : ''}
       <div id="placementNotesList" class="placement-notes-list">
         ${filtered.length ? filtered.map(r=>{
           const meta=placementNoteMeta(r);
           const ext=String(r.title||'').toLowerCase().split('.').pop();
-          const icon=/pdf/.test(ext)?'PDF':/ppt/.test(ext)?'PPT':/doc/.test(ext)?'DOC':/xls/.test(ext)?'XLS':'FILE';
+          const icon='PDF';
           return `<article class="placement-note-card">
             <div class="placement-note-filetype">${icon}</div>
-            <div class="placement-note-content"><div class="placement-note-tags"><span class="placement-note-important">★ IMPORTANT</span><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span>${!isAdmin?`<span class="placement-note-demo-count">${placementNoteDisplayCount(r.id)} downloaded · illustrative</span>`:''}</div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div>
-            <div class="placement-note-actions"><button class="placement-note-download" onclick="openSupabaseResource('${escId(r.id)}','download')">Download ↓</button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div>
+            <div class="placement-note-content"><div class="placement-note-tags"><span class="placement-note-important">★ IMPORTANT</span><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span>${!isAdmin?`<span class="placement-note-demo-count">PDF · view only</span>`:''}</div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div>
+            <div class="placement-note-actions"><button class="placement-note-open" onclick="openPlacementNoteViewer('${escId(r.id)}')">Read PDF <span>↗</span></button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div>
           </article>`;
         }).join('') : `<div class="placement-notes-empty"><div class="placement-notes-empty-icon">📚</div><h3>${all.length?'No matching notes':'Your placement library starts here'}</h3><p>${all.length?'Try another search or category.':(isAdmin?'Upload the first placement resource to make it available to students.':'Placement notes uploaded by the Academic Committee will appear here.')}</p>${isAdmin && !all.length?`<button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload first resource</button>`:''}</div>`}
       </div>
-      <p class="placement-notes-footnote">Select Download to access a resource. Download activity is recorded for admin analytics.</p>
+      <p class="placement-notes-footnote">PDFs open inside Acadcom. Download and print controls are not provided. Viewing activity is recorded for the Academic Committee.</p>
     </section>`;
 }
 window.togglePlacementNotesAnalytics = async function(){
@@ -1042,7 +1033,7 @@ window.togglePlacementNotesAnalytics = async function(){
   try{
     const sb=window.supabaseClient;
     const {data,error}=await sb.from('placement_note_events')
-      .select('resource_id,user_id,event_type,created_at').eq('event_type','download')
+      .select('resource_id,user_id,event_type,created_at').in('event_type',['view','download'])
       .order('created_at',{ascending:false});
     if(error) throw error;
     const rows=data||[];
@@ -1079,12 +1070,12 @@ window.togglePlacementNotesAnalytics = async function(){
         const section=student?.section?` · Section ${esc(student.section)}`:'';
         return `<li class="placement-download-person"><div><b>${esc(displayName)}</b><small>${student?`Student${studentCode}${section}`:'No matching student roster record'}</small></div><time>${esc(formatEventTime(event.created_at))}</time></li>`;
       }).join('');
-      return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${noteStudentIds.length} unique students</small></div><span>↓ ${events.length} download clicks</span></div><details class="placement-download-details"><summary>View names (${events.length})</summary>${events.length?`<ul class="placement-download-people">${downloadList}</ul>`:'<p class="placement-download-empty">No download activity recorded yet.</p>'}</details></div>`;
+      return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${noteStudentIds.length} unique students</small></div><span>◉ ${events.filter(e=>e.event_type==='view').length} views</span></div><details class="placement-download-details"><summary>View names (${events.length})</summary>${events.length?`<ul class="placement-download-people">${downloadList}</ul>`:'<p class="placement-download-empty">No view activity recorded yet.</p>'}</details></div>`;
     }).join('');
 
-    const totalDownloads=rows.length;
+    const totalDownloads=rows.filter(e=>e.event_type==='view').length;
     const totalStudents=studentIds.size;
-    host.innerHTML=`<div class="placement-analytics-heading"><div><b>Placement Notes Analytics</b><small>Student names and IDs · each entry is a download-button click</small></div><button onclick="togglePlacementNotesAnalytics()" aria-label="Close analytics">✕</button></div><div class="placement-analytics-summary"><div><b>${totalDownloads}</b><small>Download clicks</small></div><div><b>${totalStudents}</b><small>Unique students</small></div></div>${cards||'<p>No placement notes available yet.</p>'}`;
+    host.innerHTML=`<div class="placement-analytics-heading"><div><b>Placement Notes Analytics</b><small>Student names and IDs · views are logged when a PDF is opened</small></div><button onclick="togglePlacementNotesAnalytics()" aria-label="Close analytics">✕</button></div><div class="placement-analytics-summary"><div><b>${totalDownloads}</b><small>PDF views</small></div><div><b>${totalStudents}</b><small>Unique students</small></div></div>${cards||'<p>No placement notes available yet.</p>'}`;
   }catch(err){
     console.error('Placement notes analytics load failed:',err);
     host.innerHTML='<p>Analytics are not configured yet. Apply the supplied SQL setup, then refresh.</p>';
@@ -1111,8 +1102,8 @@ window.placementNotesRefreshList = function(){
   const escId = v => String(v??'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
   host.innerHTML = filtered.length ? filtered.map(r=>{
     const meta=placementNoteMeta(r), ext=String(r.title||'').toLowerCase().split('.').pop();
-    const icon=/pdf/.test(ext)?'PDF':/ppt/.test(ext)?'PPT':/doc/.test(ext)?'DOC':/xls/.test(ext)?'XLS':'FILE';
-    return `<article class="placement-note-card"><div class="placement-note-filetype">${icon}</div><div class="placement-note-content"><div class="placement-note-tags"><span class="placement-note-important">★ IMPORTANT</span><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span>${!isAdmin?`<span class="placement-note-demo-count">${placementNoteDisplayCount(r.id)} downloaded · illustrative</span>`:''}</div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div><div class="placement-note-actions"><button class="placement-note-download" onclick="openSupabaseResource('${escId(r.id)}','download')">Download ↓</button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div></article>`;
+    const icon='PDF';
+    return `<article class="placement-note-card"><div class="placement-note-filetype">${icon}</div><div class="placement-note-content"><div class="placement-note-tags"><span class="placement-note-important">★ IMPORTANT</span><span>${esc(meta.category)}</span><span>${esc(placementNoteDate(r.created_at))}</span>${!isAdmin?`<span class="placement-note-demo-count">PDF · view only</span>`:''}</div><h3>${esc(r.title||'Untitled placement note')}</h3><p>${esc(meta.description||'Placement preparation material')}</p></div><div class="placement-note-actions"><button class="placement-note-open" onclick="openPlacementNoteViewer('${escId(r.id)}')">Read PDF <span>↗</span></button>${isAdmin?`<button class="placement-note-delete" onclick="deletePlacementNote('${escId(r.id)}')">Remove</button>`:''}</div></article>`;
   }).join('') : `<div class="placement-notes-empty"><div class="placement-notes-empty-icon">📚</div><h3>${all.length?'No matching notes':'Your placement library starts here'}</h3><p>${all.length?'Try another search or category.':(isAdmin?'Upload the first placement resource to make it available to students.':'Placement notes uploaded by the Academic Committee will appear here.')}</p>${isAdmin&&!all.length?`<button class="placement-notes-upload-btn" onclick="openPlacementNoteForm()">＋ Upload first resource</button>`:''}</div>`;
   if(active && input) input.focus();
 };
@@ -1120,14 +1111,14 @@ window.openPlacementNoteForm = function(){
   if(CURRENT_USER?.role!=='admin'){toast('Admin access required.');return;}
   openModal(`
     <div class="mhead"><h3>✦ Upload Placement Notes</h3><button class="close-x" onclick="closeModal()">✕</button></div>
-    <p class="pagesub">Add a clearly named file to the shared placement library.</p>
+    <p class="pagesub">Upload a PDF. Students can read it in Acadcom without normal download or print controls.</p>
     <label>Resource title *</label><input id="placement_note_title" placeholder="e.g. Godrej Agrovet — Company & Interview Brief">
     <label>Category *</label><select id="placement_note_category">
       <option>Company Preparation</option><option>GD & Interviews</option><option>Resume & HR</option><option>Aptitude & Case Studies</option><option>Agribusiness</option><option>Placement Process</option><option>Other</option>
     </select>
     <label>Short description (optional)</label><textarea id="placement_note_description" rows="3" placeholder="What this file covers and when to use it"></textarea>
-    <label>Choose file *</label><input id="placement_note_file" type="file" accept=".pdf,.ppt,.pptx,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png">
-    <small style="display:block;margin-top:6px;color:var(--muted,#667085)">Supported: PDF, PowerPoint, Word, Excel and images.</small>
+    <label>Choose file *</label><input id="placement_note_file" type="file" accept="application/pdf,.pdf">
+    <small style="display:block;margin-top:6px;color:var(--muted,#667085)">PDF only · maximum 50 MB · student access is view-only.</small>
     <button id="placement_note_save_btn" class="btn btn-primary btn-block" style="margin-top:14px" onclick="savePlacementNote()">Upload to Placement Notes</button>
   `);
 };
@@ -1141,24 +1132,25 @@ window.savePlacementNote = async function(){
   const file=document.getElementById('placement_note_file')?.files?.[0];
   if(!title){toast('Please enter a title.');return;}
   if(!file){toast('Please choose a file.');return;}
-  const allowed=/\.(pdf|ppt|pptx|doc|docx|xls|xlsx|jpg|jpeg|png)$/i.test(file.name);
-  if(!allowed){toast('This file type is not supported.');return;}
+  const allowed=file.type==='application/pdf' || /\.pdf$/i.test(file.name);
+  if(!allowed){toast('Placement Notes accepts PDF files only.');return;}
+  if(file.size>50*1024*1024){toast('PDF must be 50 MB or smaller.');return;}
+  const signature=new Uint8Array(await file.slice(0,5).arrayBuffer());
+  if(new TextDecoder().decode(signature)!=='%PDF-'){toast('The selected file is not a valid PDF.');return;}
   const safeName=file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
   const filePath=`placement-notes/${Date.now()}_${crypto.randomUUID()}_${safeName}`;
   const btn=document.getElementById('placement_note_save_btn');
   if(btn){btn.disabled=true;btn.textContent='Uploading…';}
   try{
-    const {error:uploadError}=await sb.storage.from('academic-resources').upload(filePath,file,{cacheControl:'3600',upsert:false});
+    const {error:uploadError}=await sb.storage.from('acadcom-placement-notes').upload(filePath,file,{cacheControl:'0',contentType:'application/pdf',upsert:false});
     if(uploadError) throw uploadError;
-    const {data:publicData}=sb.storage.from('academic-resources').getPublicUrl(filePath);
-    const fileUrl=publicData?.publicUrl;
-    if(!fileUrl){await sb.storage.from('academic-resources').remove([filePath]);throw new Error('Could not create file URL.');}
+    const fileUrl='private://'+filePath;
     const marker=`${PLACEMENT_NOTE_MARKER}\nCategory: ${category}\n${description}`;
     const {error:dbError}=await sb.from('resources').insert({
-      title,description:marker,subject_id:null,resource_type:'🎯',file_url:fileUrl,is_active:true,display_order:0
+      title,description:marker,subject_id:null,resource_type:'🎯',file_url:fileUrl,file_type:'application/pdf',is_active:true,display_order:0
     });
-    if(dbError){await sb.storage.from('academic-resources').remove([filePath]);throw dbError;}
-    toast('Placement notes uploaded successfully.');
+    if(dbError){await sb.storage.from('acadcom-placement-notes').remove([filePath]);throw dbError;}
+    toast('Private PDF added to Placement Notes.');
     closeModal();
     await loadSupabaseResources();
     window.PLACEMENT_NOTES_QUERY='';
@@ -7091,26 +7083,87 @@ async function saveSupabaseResource() {
 function openSupabaseResource(id, eventType='download') {
   const resource = (window.SUPABASE_RESOURCES || []).find(r => String(r.id) === String(id));
   if (!resource) { toast('Resource not found.'); return; }
+  if (isPlacementNoteResource(resource)) { openPlacementNoteViewer(id); return; }
   if (!resource.file_url) { toast('No resource link has been added.'); return; }
-
-  // Open synchronously to avoid browser popup blockers; record analytics in the background.
   window.open(resource.file_url, '_blank', 'noopener');
-  if (isPlacementNoteResource(resource)) {
-    (async () => {
-      try {
-        const sb = window.supabaseClient;
-        const { data: { user } = {} } = await sb.auth.getUser();
-        if (!user) return;
-        const { error } = await sb.from('placement_note_events').insert({
-          resource_id: resource.id,
-          user_id: user.id,
-          event_type: eventType === 'download' ? 'download' : 'view'
-        });
-        if (error) console.warn('Placement note analytics event was not saved:', error.message);
-      } catch (err) { console.warn('Placement note analytics unavailable:', err); }
-    })();
-  }
 }
+
+let placementPdfJsPromise = null;
+function loadPlacementPdfJs(){
+  if(window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if(placementPdfJsPromise) return placementPdfJsPromise;
+  placementPdfJsPromise = new Promise((resolve,reject)=>{
+    const script=document.createElement('script');
+    script.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    script.onload=()=>{ if(!window.pdfjsLib){reject(new Error('PDF viewer failed to initialise.'));return;} window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; resolve(window.pdfjsLib); };
+    script.onerror=()=>reject(new Error('Could not load the PDF viewer. Check your internet connection.'));
+    document.head.appendChild(script);
+  });
+  return placementPdfJsPromise;
+}
+
+window.openPlacementNoteViewer = async function(id){
+  const resource=(window.SUPABASE_RESOURCES||[]).find(r=>String(r.id)===String(id));
+  if(!resource || !isPlacementNoteResource(resource)){toast('Placement note not found.');return;}
+  const sb=window.supabaseClient;
+  if(!sb){toast('Supabase connection unavailable.');return;}
+  const previous=document.getElementById('placementPdfViewer'); if(previous) previous.remove();
+  const shell=document.createElement('div'); shell.id='placementPdfViewer'; shell.className='placement-pdf-viewer';
+  shell.innerHTML=`<div class="placement-pdf-toolbar"><div class="placement-pdf-heading"><b>${esc(resource.title||'Placement PDF')}</b><small>VIEW-ONLY READER · ACADCOM</small></div><div class="placement-pdf-tools"><button id="placementPdfZoomOut" aria-label="Zoom out">−</button><span id="placementPdfZoomLabel">100%</span><button id="placementPdfZoomIn" aria-label="Zoom in">＋</button><button id="placementPdfClose" class="placement-pdf-close">Close ✕</button></div></div><div id="placementPdfStatus" class="placement-pdf-status">Securing your access…</div><div id="placementPdfPages" class="placement-pdf-pages"></div>`;
+  document.body.appendChild(shell);
+  let zoom=1.0, pdf=null, rendering=false;
+  const status=shell.querySelector('#placementPdfStatus'), pages=shell.querySelector('#placementPdfPages');
+  const renderAll=async()=>{
+    if(!pdf||rendering)return; rendering=true; pages.innerHTML='';
+    try{
+      for(let n=1;n<=pdf.numPages;n++){
+        const page=await pdf.getPage(n), viewport=page.getViewport({scale:zoom});
+        const wrap=document.createElement('div'); wrap.className='placement-pdf-page';
+        const canvas=document.createElement('canvas'); canvas.width=Math.ceil(viewport.width); canvas.height=Math.ceil(viewport.height);
+        canvas.style.width='100%'; canvas.style.height='auto';
+        const watermark=document.createElement('div'); watermark.className='placement-pdf-watermark'; watermark.textContent=(CURRENT_USER?.name||'ACADCOM USER')+' · '+(CURRENT_USER?.studentId||CURRENT_USER?.id||'')+' · VIEW ONLY';
+        const number=document.createElement('small'); number.className='placement-pdf-page-number'; number.textContent='Page '+n+' of '+pdf.numPages;
+        wrap.append(canvas,watermark,number); pages.appendChild(wrap);
+        await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+      }
+      status.textContent=pdf.numPages+' pages · Scroll to read · Zoom controls above'; status.classList.add('is-ready');
+    }catch(e){status.textContent='Could not render this PDF: '+e.message;}
+    finally{rendering=false;}
+  };
+  shell.querySelector('#placementPdfClose').onclick=()=>shell.remove();
+  shell.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&['p','s'].includes(String(e.key).toLowerCase())){e.preventDefault();e.stopPropagation();}});
+  shell.addEventListener('contextmenu',e=>e.preventDefault());
+  shell.querySelector('#placementPdfZoomIn').onclick=()=>{if(!pdf)return;zoom=Math.min(2.0,zoom+0.15);shell.querySelector('#placementPdfZoomLabel').textContent=Math.round(zoom*100)+'%';renderAll();};
+  shell.querySelector('#placementPdfZoomOut').onclick=()=>{if(!pdf)return;zoom=Math.max(0.6,zoom-0.15);shell.querySelector('#placementPdfZoomLabel').textContent=Math.round(zoom*100)+'%';renderAll();};
+  try{
+    const {data,error}=await sb.functions.invoke('placement-notes-access',{body:{action:'view',resourceId:String(id)}});
+    if(error) throw new Error(error.message||'Access request failed.');
+    if(data?.error) throw new Error(data.error);
+    const pdfjs=await loadPlacementPdfJs();
+    const loading=pdfjs.getDocument({url:data.url,withCredentials:false,disableAutoFetch:false,disableStream:false});
+    pdf=await loading.promise;
+    await renderAll();
+  }catch(err){status.textContent=err?.message||'Unable to open this PDF.';status.classList.add('is-error');}
+};
+
+window.migratePlacementNotes = async function(){
+  if(CURRENT_USER?.role!=='admin'){toast('Admin access required.');return;}
+  if(!confirm('Secure all existing Placement Notes PDFs now? This copies them to private storage, updates their records, and removes their public copies only after a verified private copy is saved. General Resources will not be changed.'))return;
+  const btn=document.querySelector('.placement-notes-admin-card .placement-notes-analytics-btn');
+  if(btn){btn.disabled=true;btn.textContent='Securing…';}
+  try{
+    const {data,error}=await window.supabaseClient.functions.invoke('placement-notes-access',{body:{action:'migrate'}});
+    if(error) throw new Error(error.message||'Migration request failed.');
+    if(data?.error) throw new Error(data.error);
+    const migrated=(data.results||[]).filter(x=>x.status==='migrated').length;
+    const failed=(data.results||[]).filter(x=>x.status==='failed');
+    console.table(data.results||[]);
+    toast(`${migrated} PDF(s) secured. ${failed.length} issue(s).`);
+    await loadSupabaseResources(); render();
+    if(failed.length) alert('Some files need attention:\n'+failed.map(x=>x.id+': '+x.error).join('\n'));
+  }catch(err){console.error(err);toast('Migration failed: '+(err.message||'Unknown error'));}
+  finally{if(btn){btn.disabled=false;btn.textContent='🔒 Secure existing PDFs';}}
+};
 
 
 /* =========================================================
@@ -11800,6 +11853,15 @@ const originalRenderAce=window.renderAceRoot;window.renderAceRoot=function(){con
 }
 .acadcom-global-homebar button:hover{background:var(--seal-tint,#e9eefb);transform:translateY(-1px)}
 .acadcom-global-homebar button:focus-visible{outline:3px solid rgba(58,98,216,.3);outline-offset:2px}
+
+.placement-pdf-viewer{position:fixed;inset:0;z-index:100000;background:#eef0f3;display:flex;flex-direction:column;color:#1f2937}
+.placement-pdf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:#211b10;color:#fff;box-shadow:0 3px 14px #0003;z-index:2}
+.placement-pdf-heading{min-width:0}.placement-pdf-heading b{display:block;max-width:52vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}.placement-pdf-heading small{display:block;color:#f0d38c;font-size:9px;letter-spacing:.12em;margin-top:3px}
+.placement-pdf-tools{display:flex;align-items:center;gap:7px}.placement-pdf-tools button{border:1px solid #8d774d;background:#40341e;color:#fff;border-radius:8px;padding:8px 11px;font-weight:800;cursor:pointer}.placement-pdf-tools span{font-size:12px;min-width:42px;text-align:center}.placement-pdf-tools .placement-pdf-close{background:#f4e8c9;color:#38280c;border-color:#f4e8c9}
+.placement-pdf-status{padding:10px;text-align:center;background:#fff7e5;color:#73520d;font-size:12px}.placement-pdf-status.is-ready{color:#47634a}.placement-pdf-status.is-error{color:#a11;background:#fff0f0}
+.placement-pdf-pages{flex:1;overflow:auto;padding:18px 10px 36px;overscroll-behavior:contain}.placement-pdf-page{position:relative;width:min(100%,980px);margin:0 auto 18px;background:#fff;box-shadow:0 2px 14px #0002;overflow:hidden}.placement-pdf-page canvas{display:block}.placement-pdf-watermark{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;user-select:none;opacity:.13;color:#7a4b00;font-size:clamp(14px,2vw,24px);font-weight:900;letter-spacing:.12em;text-align:center;transform:rotate(-28deg);text-shadow:0 0 1px #fff;white-space:nowrap}.placement-pdf-page-number{position:absolute;right:10px;bottom:7px;color:#666;background:#ffffffbd;padding:3px 6px;border-radius:5px;font-size:10px}
+@media(max-width:600px){.placement-pdf-toolbar{align-items:flex-start;flex-direction:column}.placement-pdf-heading b{max-width:88vw}.placement-pdf-tools{width:100%;justify-content:flex-end}.placement-pdf-pages{padding:10px 4px 28px}}
+
 </style>
 
 
