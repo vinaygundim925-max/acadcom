@@ -1,2 +1,5 @@
-
-{}
+{
+  "analytics": {
+    "enable": true
+  }
+}
