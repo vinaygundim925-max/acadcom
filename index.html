@@ -1061,16 +1061,31 @@ window.togglePlacementNotesAnalytics = async function(){
     };
 
     const cards=notes.map(note=>{
-      const events=rows.filter(e=>String(e.resource_id)===String(note.id));
+      // Show one row per student for each note, with their total number of views.
+      const events=rows.filter(e=>
+        String(e.resource_id)===String(note.id) && e.event_type==='view'
+      );
+      const visitsByUser=new Map();
+      events.forEach(event=>{
+        const key=String(event.user_id||'unknown');
+        const current=visitsByUser.get(key)||{count:0,lastViewed:null};
+        current.count+=1;
+        if(!current.lastViewed || new Date(event.created_at)>new Date(current.lastViewed)){
+          current.lastViewed=event.created_at;
+        }
+        visitsByUser.set(key,current);
+      });
       const noteStudentIds=[...new Set(events.map(e=>e.user_id).filter(id=>id && studentIds.has(String(id))))];
-      const downloadList=events.map(event=>{
-        const student=studentByAuthId.get(String(event.user_id));
-        const displayName=student?.name||'Student record unavailable';
-        const studentCode=student?.id?` · Roll No: ${esc(student.id)}`:'';
-        const section=student?.section?` · Section ${esc(student.section)}`:'';
-        return `<li class="placement-download-person"><div><b>${esc(displayName)}</b><small>${student?`Student${studentCode}${section}`:'No matching student roster record'}</small></div><time>${esc(formatEventTime(event.created_at))}</time></li>`;
-      }).join('');
-      return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${noteStudentIds.length} unique students</small></div><span>◉ ${events.filter(e=>e.event_type==='view').length} views</span></div><details class="placement-download-details"><summary>View names (${events.length})</summary>${events.length?`<ul class="placement-download-people">${downloadList}</ul>`:'<p class="placement-download-empty">No view activity recorded yet.</p>'}</details></div>`;
+      const visitorList=[...visitsByUser.entries()]
+        .sort((a,b)=>b[1].count-a[1].count)
+        .map(([userId,visit])=>{
+          const student=studentByAuthId.get(userId);
+          const displayName=student?.name||'Student record unavailable';
+          const studentCode=student?.id?` · Roll No: ${esc(student.id)}`:'';
+          const section=student?.section?` · Section ${esc(student.section)}`:'';
+          return `<li class="placement-download-person"><div><b>${esc(displayName)}</b><small>${student?`Student${studentCode}${section}`:'No matching student roster record'}</small></div><time><b>${visit.count} ${visit.count===1?'visit':'visits'}</b><small>Last: ${esc(formatEventTime(visit.lastViewed))}</small></time></li>`;
+        }).join('');
+      return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${noteStudentIds.length} unique students</small></div><span>◉ ${events.length} views</span></div><details class="placement-download-details"><summary>View students (${visitsByUser.size})</summary>${events.length?`<ul class="placement-download-people">${visitorList}</ul>`:'<p class="placement-download-empty">No view activity recorded yet.</p>'}</details></div>`;
     }).join('');
 
     const totalDownloads=rows.filter(e=>e.event_type==='view').length;
