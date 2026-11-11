@@ -1033,14 +1033,15 @@ window.togglePlacementNotesAnalytics = async function(){
   try{
     const sb=window.supabaseClient;
     const {data,error}=await sb.from('placement_note_events')
-      .select('resource_id,user_id,event_type,created_at').in('event_type',['view','download'])
+      .select('resource_id,user_id,event_type,created_at').eq('event_type','view')
       .order('created_at',{ascending:false});
     if(error) throw error;
     const rows=data||[];
-
-    // Download events store Supabase Auth UUIDs. In Acadcom, the
-    // student roster links those UUIDs through students.auth_user_id.
-    const userIds=[...new Set(rows.map(e=>e.user_id).filter(Boolean))];
+    const {data:timeRows,error:timeError}=await sb.from('placement_note_time_sessions')
+      .select('resource_id,user_id,duration_seconds,last_heartbeat_at');
+    if(timeError) throw timeError;
+    const sessions=timeRows||[];
+    const userIds=[...new Set([...rows.map(e=>e.user_id),...sessions.map(e=>e.user_id)].filter(Boolean))];
     let studentRows=[];
     if(userIds.length){
       const {data:studentData,error:studentError}=await sb.from('students')
@@ -1051,49 +1052,53 @@ window.togglePlacementNotesAnalytics = async function(){
     const studentByAuthId=new Map(studentRows.map(s=>[String(s.auth_user_id),s]));
     const studentIds=new Set(studentRows.map(s=>String(s.auth_user_id)));
     const notes=(window.SUPABASE_RESOURCES||[]).filter(isPlacementNoteResource);
-
     const formatEventTime=value=>{
       if(!value) return 'Time unavailable';
       const date=new Date(value);
-      return Number.isNaN(date.getTime())?'Time unavailable':date.toLocaleString('en-IN',{
-        day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'
-      });
+      return Number.isNaN(date.getTime())?'Time unavailable':date.toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
     };
-
+    const formatDuration=seconds=>{
+      const n=Math.max(0,Math.floor(Number(seconds)||0));
+      const h=Math.floor(n/3600),m=Math.floor((n%3600)/60),sec=n%60;
+      return h?`${h} hr ${m} min ${sec} sec`:m?`${m} min ${sec} sec`:`${sec} sec`;
+    };
     const cards=notes.map(note=>{
-      // Show one row per student for each note, with their total number of views.
-      const events=rows.filter(e=>
-        String(e.resource_id)===String(note.id) && e.event_type==='view'
-      );
-      const visitsByUser=new Map();
-      events.forEach(event=>{
-        const key=String(event.user_id||'unknown');
-        const current=visitsByUser.get(key)||{count:0,lastViewed:null};
-        current.count+=1;
-        if(!current.lastViewed || new Date(event.created_at)>new Date(current.lastViewed)){
-          current.lastViewed=event.created_at;
-        }
-        visitsByUser.set(key,current);
+      const events=rows.filter(e=>String(e.resource_id)===String(note.id));
+      const noteSessions=sessions.filter(e=>String(e.resource_id)===String(note.id));
+      const byUser=new Map();
+      events.forEach(e=>{
+        if(!e.user_id)return;
+        const key=String(e.user_id),entry=byUser.get(key)||{visits:0,lastVisit:null,totalSeconds:0};
+        entry.visits++;
+        if(!entry.lastVisit||new Date(e.created_at)>new Date(entry.lastVisit))entry.lastVisit=e.created_at;
+        byUser.set(key,entry);
       });
-      const noteStudentIds=[...new Set(events.map(e=>e.user_id).filter(id=>id && studentIds.has(String(id))))];
-      const visitorList=[...visitsByUser.entries()]
-        .sort((a,b)=>b[1].count-a[1].count)
-        .map(([userId,visit])=>{
-          const student=studentByAuthId.get(userId);
-          const displayName=student?.name||'Student record unavailable';
-          const studentCode=student?.id?` · Roll No: ${esc(student.id)}`:'';
-          const section=student?.section?` · Section ${esc(student.section)}`:'';
-          return `<li class="placement-download-person"><div><b>${esc(displayName)}</b><small>${student?`Student${studentCode}${section}`:'No matching student roster record'}</small></div><time><b>${visit.count} ${visit.count===1?'visit':'visits'}</b><small>Last: ${esc(formatEventTime(visit.lastViewed))}</small></time></li>`;
-        }).join('');
-      return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${noteStudentIds.length} unique students</small></div><span>◉ ${events.length} views</span></div><details class="placement-download-details"><summary>View students (${visitsByUser.size})</summary>${events.length?`<ul class="placement-download-people">${visitorList}</ul>`:'<p class="placement-download-empty">No view activity recorded yet.</p>'}</details></div>`;
+      noteSessions.forEach(e=>{
+        if(!e.user_id)return;
+        const key=String(e.user_id),entry=byUser.get(key)||{visits:0,lastVisit:null,totalSeconds:0};
+        entry.totalSeconds+=Number(e.duration_seconds)||0;
+        byUser.set(key,entry);
+      });
+      const people=[...byUser.entries()].sort((a,b)=>b[1].visits-a[1].visits||b[1].totalSeconds-a[1].totalSeconds);
+      const totalSeconds=noteSessions.reduce((sum,e)=>sum+(Number(e.duration_seconds)||0),0);
+      const totalViews=events.length;
+      const list=people.map(([uid,stats])=>{
+        const student=studentByAuthId.get(uid);
+        const name=student?.name||'Student record unavailable';
+        const code=student?.id?` · Roll No: ${esc(student.id)}`:'';
+        const section=student?.section?` · Section ${esc(student.section)}`:'';
+        return `<li class="placement-download-person"><div><b>${esc(name)}</b><small>${student?`Student${code}${section}`:'No matching student roster record'} · ${stats.visits} ${stats.visits===1?'visit':'visits'} · ${esc(formatDuration(stats.totalSeconds))} total</small></div><time>${esc(formatEventTime(stats.lastVisit))}</time></li>`;
+      }).join('');
+      const uniqueCount=people.filter(([uid])=>studentIds.has(uid)).length;
+      return `<div class="placement-analytics-note"><div class="placement-analytics-row"><div><b>${esc(note.title||'Untitled note')}</b><small>${uniqueCount} unique students</small></div><span>◉ ${totalViews} views · ◷ ${esc(formatDuration(totalSeconds))}</span></div><details class="placement-download-details"><summary>View students (${people.length})</summary>${list?`<ul class="placement-download-people">${list}</ul>`:'<p class="placement-download-empty">No usage recorded yet.</p>'}</details></div>`;
     }).join('');
-
-    const totalDownloads=rows.filter(e=>e.event_type==='view').length;
-    const totalStudents=studentIds.size;
-    host.innerHTML=`<div class="placement-analytics-heading"><div><b>Placement Notes Analytics</b><small>Student names and IDs · views are logged when a PDF is opened</small></div><button onclick="togglePlacementNotesAnalytics()" aria-label="Close analytics">✕</button></div><div class="placement-analytics-summary"><div><b>${totalDownloads}</b><small>PDF views</small></div><div><b>${totalStudents}</b><small>Unique students</small></div></div>${cards||'<p>No placement notes available yet.</p>'}`;
+    const totalViews=rows.length;
+    const totalSeconds=sessions.reduce((sum,e)=>sum+(Number(e.duration_seconds)||0),0);
+    const totalStudents=new Set([...rows,...sessions].map(e=>String(e.user_id)).filter(id=>studentIds.has(id))).size;
+    host.innerHTML=`<div class="placement-analytics-heading"><div><b>Placement Notes Analytics</b><small>One row per student · visits and active reading time</small></div><button onclick="togglePlacementNotesAnalytics()" aria-label="Close analytics">✕</button></div><div class="placement-analytics-summary"><div><b>${totalViews}</b><small>PDF views</small></div><div><b>${totalStudents}</b><small>Unique students</small></div><div><b>${esc(formatDuration(totalSeconds))}</b><small>Total reading time</small></div></div>${cards||'<p>No placement notes available yet.</p>'}`;
   }catch(err){
     console.error('Placement notes analytics load failed:',err);
-    host.innerHTML='<p>Analytics are not configured yet. Apply the supplied SQL setup, then refresh.</p>';
+    host.innerHTML='<p>Analytics could not be loaded. Check the placement time-tracking table and permissions.</p>';
   }
 };
 
@@ -7199,7 +7204,48 @@ window.openPlacementNoteViewer = async function(id){
     zoom=clamp(next,.5,3);
     renderAll(anchor);
   }
-  shell.querySelector('#placementPdfClose').onclick=()=>shell.remove();
+  let timeSessionId=null, trackedSeconds=0, lastTick=Date.now(), timeFlushBusy=false;
+  let timeTrackingStarted=false;
+  // Count only while the actual PDF reader is open, visible and in the foreground.
+  // Hiding/minimising the reader inside ACADCOM, switching browser tabs, or
+  // moving focus to another window pauses the timer.
+  const isPlacementReaderActive=()=>{
+    if(!shell.isConnected||document.hidden||document.visibilityState!=='visible')return false;
+    if(typeof document.hasFocus==='function'&&!document.hasFocus())return false;
+    const style=window.getComputedStyle(shell);
+    if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0)return false;
+    const rect=shell.getBoundingClientRect();
+    if(rect.width<=0||rect.height<=0||rect.bottom<=0||rect.right<=0||rect.top>=window.innerHeight||rect.left>=window.innerWidth)return false;
+    return true;
+  };
+  const flushReadingTime=async(end=false)=>{
+    if(!timeTrackingStarted||!timeSessionId||timeFlushBusy)return;
+    timeFlushBusy=true;
+    const now=Date.now();
+    if(isPlacementReaderActive())trackedSeconds+=Math.max(0,Math.min(30,Math.floor((now-lastTick)/1000)));
+    lastTick=now;
+    try{
+      const {error}=await sb.from('placement_note_time_sessions').update({
+        duration_seconds:trackedSeconds,last_heartbeat_at:new Date().toISOString(),ended_at:end?new Date().toISOString():null
+      }).eq('id',timeSessionId);
+      if(error)console.warn('Placement reading-time save failed:',error);
+    }catch(e){console.warn('Placement reading-time save failed:',e);}
+    finally{timeFlushBusy=false;}
+  };
+  const closePlacementPdf=async()=>{await flushReadingTime(true);shell.remove();};
+  shell.querySelector('#placementPdfClose').onclick=closePlacementPdf;
+  const visibilityHandler=()=>{flushReadingTime(false);lastTick=Date.now();};
+  const focusHandler=()=>{lastTick=Date.now();};
+  document.addEventListener('visibilitychange',visibilityHandler);
+  window.addEventListener('blur',visibilityHandler);
+  window.addEventListener('focus',focusHandler);
+  shell.addEventListener('DOMNodeRemoved',()=>{
+    document.removeEventListener('visibilitychange',visibilityHandler);
+    window.removeEventListener('blur',visibilityHandler);
+    window.removeEventListener('focus',focusHandler);
+    clearInterval(readingHeartbeat);
+  });
+  const readingHeartbeat=setInterval(()=>flushReadingTime(false),15000);
   shell.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&['p','s'].includes(String(e.key).toLowerCase())){e.preventDefault();e.stopPropagation();}});
   shell.addEventListener('contextmenu',e=>e.preventDefault());
   shell.querySelector('#placementPdfZoomIn').onclick=()=>changeZoom(zoom+.1);
@@ -7236,6 +7282,18 @@ window.openPlacementNoteViewer = async function(id){
     const loading=pdfjs.getDocument({url:data.url,withCredentials:false,disableAutoFetch:false,disableStream:false});
     pdf=await loading.promise;
     await renderAll(null);
+    if(CURRENT_USER?.role!=='admin'){
+      const {data:userData,error:userError}=await sb.auth.getUser();
+      if(userError)throw userError;
+      const authUserId=userData?.user?.id;
+      if(authUserId){
+        const {data:sessionData,error:sessionError}=await sb.from('placement_note_time_sessions').insert({
+          resource_id:String(id),user_id:authUserId,duration_seconds:0
+        }).select('id').single();
+        if(sessionError)throw sessionError;
+        timeSessionId=sessionData.id;timeTrackingStarted=true;lastTick=Date.now();
+      }
+    }
   }catch(err){status.textContent=err?.message||'Unable to open this PDF.';status.classList.add('is-error');}
 };
 window.migratePlacementNotes = async function(){
